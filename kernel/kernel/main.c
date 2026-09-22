@@ -16,6 +16,7 @@
 #include <lume/mem.h>
 #include <lume/panic.h>
 #include <lume/proc.h>
+#include <lume/pte.h>
 #include <lume/sched.h>
 #include <lume/string.h>
 #include <lume/time.h>
@@ -43,7 +44,6 @@ void timer_register_irq(void);
 u32 irq_total_count(void);
 
 /* Physical page pinned by the boot stub for the high vector page. */
-#define VECTOR_PAGE_PA 0x000F0000u
 
 /* The Raspberry Pi firmware keeps its ATAGS/device tree, the boot command
  * line and its own state in low memory.  Reserving the first 8 MiB costs

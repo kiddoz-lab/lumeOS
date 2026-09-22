@@ -17,6 +17,17 @@
 /* ------------------------------------------------------------------ */
 /* Level 1 (section / page-table) descriptors                          */
 /* ------------------------------------------------------------------ */
+/*
+ * Physical memory reserved by the boot stub before the MMU is on.  These are
+ * the address the linker script and kernel/arch/arm/boot.S agree on; they are
+ * here so that the kernel has a single definition to refer to.
+ */
+#define BOOT_L1_PA      0x00004000u   /* 16 KiB level 1 translation table */
+#define VECTOR_PAGE_PA  0x000F0000u   /* 4 KiB exception vector page, mapped
+                                       * at the architectural high-vector
+                                       * address 0xFFFF0000 */
+#define VECTOR_PAGE_VA  0xFFFF0000u
+
 #define L1_TYPE_MASK 0x3u
 #define L1_TYPE_FAULT 0x0u
 #define L1_TYPE_PAGETABLE 0x1u  /* pointer to a level 2 table */

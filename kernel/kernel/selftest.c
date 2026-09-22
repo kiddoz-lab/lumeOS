@@ -15,6 +15,7 @@
 #include <lume/klog.h>
 #include <lume/mem.h>
 #include <lume/proc.h>
+#include <lume/pte.h>
 #include <lume/sched.h>
 #include <lume/string.h>
 #include <lume/time.h>
@@ -129,14 +130,32 @@ static void test_vmm(void)
     check("vmm space create", as != NULL);
     if (as) {
         u32 pa = pmm_alloc_page();
+        u32 translated = 0;
 
         check("vmm map page", pa != 0 && vmm_map_page(as, 0x00100000, pa,
                                                       VM_FLAG_USER | VM_FLAG_WRITE) == 0);
-        check("vmm translate", vmm_translate(as, 0x00100000) == pa);
+        check("vmm translate", vmm_translate(as, 0x00100000, &translated) == 0 &&
+                               translated == pa);
+
+        /* An address that was never mapped must report failure, not a
+         * successful translation to physical 0. */
+        translated = 0xFFFFFFFFu;
+        check("vmm unmapped reports failure",
+              vmm_translate(as, 0x00300000, &translated) != 0);
+
         check("vmm check user writable",
               vmm_check_range(as, 0x00100000, 4096, 1, 1) == 0);
-        check("vmm kernel half mapped",
-              vmm_translate(as, 0xC0000000) != 0);
+
+        /* A new address space must inherit the kernel half, including the alias
+         * at 0xC0000000 (which maps to *physical* 0 - the case the old
+         * return-value API could not express) and the exception vector page. */
+        check("vmm kernel alias mapped",
+              vmm_translate(as, 0xC0008000, &translated) == 0 &&
+              translated == 0x00008000);
+        check("vmm vector page mapped",
+              vmm_translate(as, 0xFFFF0000, &translated) == 0 &&
+              translated == VECTOR_PAGE_PA);
+
         vmm_unmap_page(as, 0x00100000);
         vmm_space_destroy(as);
     }

@@ -79,7 +79,18 @@ void *vmm_map_uncached(u32 pa, u32 size, u32 *out_va);
 void vmm_switch_to(struct vm_space *as);
 
 /** Software page table walk; returns 0 when the address is not mapped. */
-u32 vmm_translate(struct vm_space *as, u32 va);
+/*
+ * Translate `va` in `as` (or in the current space when `as` is NULL).
+ * Returns 0 and stores the physical address in *pa_out on success, -1 when the
+ * address is not mapped.
+ *
+ * The physical address is an out-parameter on purpose: physical address 0 is a
+ * perfectly valid mapping (RAM starts there, and the kernel's own alias maps
+ * virtual 0xC0000000 to it), so returning 0 as the error indicator would make
+ * the bottom of the address space indistinguishable from "unmapped".  The
+ * in-kernel self test caught exactly that ambiguity.
+ */
+int vmm_translate(struct vm_space *as, u32 va, u32 *pa_out);
 
 /** Is [va, va+len) mapped with the requested access in this address space? */
 int vmm_check_range(struct vm_space *as, u32 va, u32 len, int write, int user);

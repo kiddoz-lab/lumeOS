@@ -142,12 +142,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Emulator boot test.  Informational for now: the kernel has never been
-      # run under QEMU, so this step reports whether the image boots in QEMU's
-      # bcm2835 model without failing the build.  It becomes blocking as soon as
-      # a run shows the expected boot markers (see docs/testing.md).
-      - name: QEMU boot test (emulated, informational)
-        continue-on-error: true
+      # Emulator boot test.  This is a real gate: the kernel must reach all of
+      # its boot markers, print the self-test summary with no failures, and
+      # leave no panic or fault output behind in QEMU's bcm2835 model.  It
+      # proves nothing about real hardware - see docs/testing.md - but a
+      # regression that breaks the boot now fails the build instead of being
+      # reported as "informational".
+      - name: QEMU boot test (emulated)
         run: |
           set -o pipefail
           if ! python3 tests/qemu/run_qemu_test.py \

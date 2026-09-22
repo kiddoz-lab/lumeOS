@@ -371,13 +371,15 @@ void vmm_switch_to(struct vm_space *as)
     current_space = as;
 }
 
-u32 vmm_translate(struct vm_space *as, u32 va)
+int vmm_translate(struct vm_space *as, u32 va, u32 *pa_out)
 {
     u32 *l1;
     u32 entry;
     u32 l2_pa;
     u32 *l2;
 
+    if (!pa_out)
+        return -1;
     if (!as)
         as = current_space;
     l1 = l1_of(as);
@@ -385,17 +387,20 @@ u32 vmm_translate(struct vm_space *as, u32 va)
 
     switch (entry & L1_TYPE_MASK) {
     case L1_TYPE_SECTION:
-        return (entry & 0xFFF00000u) | (va & 0xFFFFFu);
+        *pa_out = (entry & 0xFFF00000u) | (va & 0xFFFFFu);
+        return 0;
     case L1_TYPE_PAGETABLE:
         l2_pa = entry & 0xFFFFFC00u;
         l2 = (u32 *)PHYS_TO_VIRT(l2_pa);
         entry = l2[l2_entry(va)];
         if ((entry & L2_TYPE_MASK) == L2_TYPE_SMALL_PAGE ||
-            (entry & L2_TYPE_MASK) == L2_TYPE_SMALL_PAGE_XN)
-            return (entry & 0xFFFFF000u) | (va & 0xFFFu);
-        return 0;
+            (entry & L2_TYPE_MASK) == L2_TYPE_SMALL_PAGE_XN) {
+            *pa_out = (entry & 0xFFFFF000u) | (va & 0xFFFu);
+            return 0;
+        }
+        return -1;
     default:
-        return 0;
+        return -1;
     }
 }
 
