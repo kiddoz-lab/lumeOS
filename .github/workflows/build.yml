@@ -153,8 +153,15 @@ jobs:
           if ! python3 tests/qemu/run_qemu_test.py \
               --image build/kernel.img --elf build/lumeos.elf \
               --timeout 60 --required --machine raspi0 2>&1 | tee qemu-test.log; then
-            python3 tools/ci_annotate.py qemu-test.log --title "qemu boot test" \
-                --lines 40
+            # Explain the failure: which blocks ran, where it hung, what the
+            # emulator refused to do.  Published as an annotation so it is
+            # readable through the checks API.
+            python3 tests/qemu/diagnose_boot.py \
+                --image build/kernel.img --elf build/lumeos.elf \
+                --timeout 10 2>&1 | tee qemu-diagnose.log || true
+            python3 tools/ci_annotate.py qemu-diagnose.log \
+                --title "qemu boot diagnosis" --error-lines 60 --max-chars 3500 \
+                --lines 60
             exit 1
           fi
 
