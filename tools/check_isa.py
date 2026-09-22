@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import struct
 import subprocess
@@ -55,6 +56,15 @@ ARMV7_ONLY = {
     "sxtb16", "uxtb16", "sxtab", "uxtab", "sxtah", "uxtah",
 }
 
+# Tag_CPU_name is informational and tools disagree about it.  GNU readelf
+# reports a name synthesised from Tag_CPU_arch for a linked binary ("6KZ"),
+# while LLD keeps the compiler's name ("arm1176jzf-s").  The authoritative
+# checks are Tag_CPU_arch below and the capstone scan, so only a name that
+# proves a *different, newer* core family is a failure.
+FORBIDDEN_CPU_NAME = re.compile(
+    r"cortex-a|cortex-r|cortex-m|armv7|armv8|aarch64|arm1176jz-s\b.*v7",
+    re.IGNORECASE)
+
 # The ARMv7 barrier/hint mnemonics double as CP15 instruction names in ARMv6
 # disassemblers; report them with the ARMv6 alternative spelled out.
 BARRIER_HINTS = ("dmb", "dsb", "isb", "wfe", "sev", "clrex")
@@ -62,6 +72,31 @@ BARRIER_HINTS = ("dmb", "dsb", "isb", "wfe", "sev", "clrex")
 
 class CheckError(Exception):
     pass
+
+
+def attribute_problems(attrs: dict[str, str]) -> list[str]:
+    """Check the ARM build attributes that readelf reported.
+
+    Tag_CPU_arch is the real constraint: it has to be one of the architectures
+    the ARM1176JZF-S in a BCM2835 implements.  The numeric values accepted here
+    (6, 7, 9) are the ABI's Tag_CPU_arch numbers for v6, v6KZ and v6K, because
+    readelf prints either the name or the number depending on the tool.
+    """
+    problems: list[str] = []
+
+    arch = attrs.get("cpu_arch", "")
+    if arch and arch not in ALLOWED_CPU_ARCH:
+        problems.append(
+            f"Tag_CPU_arch is '{arch}' but the ARM1176JZF-S implements ARMv6KZ; "
+            "rebuild with -march=armv6kz -mcpu=arm1176jzf-s")
+
+    name = attrs.get("cpu_name", "")
+    if name and FORBIDDEN_CPU_NAME.search(name):
+        problems.append(
+            f"Tag_CPU_name is '{name}', which identifies a newer core family "
+            "than the ARM11 in the BCM2835")
+
+    return problems
 
 
 def sections(path: Path) -> list[tuple[str, int, int, int]]:
@@ -149,21 +184,23 @@ def check_instructions(instructions: list[tuple[int, str]]) -> list[str]:
 
     for address, mnemonic in instructions:
         base = mnemonic.split(".")[0].split()[0]
-        if base in ARMV7_ONLY:
-            key = f"{base}"
-            if key in reported:
+        # The barrier/hint mnemonics are also in ARMV7_ONLY, but for those the
+        # useful message is the ARMv6 CP15 equivalent, so check them first.
+        if base in BARRIER_HINTS:
+            if base in reported:
                 continue
-            reported.add(key)
+            reported.add(base)
+            problems.append(
+                f"0x{address:08x}: '{mnemonic}' is the ARMv7 hint mnemonic; "
+                "ARMv6 must use the CP15 form (see kernel/include/lume/asm.h)")
+            continue
+        if base in ARMV7_ONLY:
+            if base in reported:
+                continue
+            reported.add(base)
             problems.append(
                 f"0x{address:08x}: '{mnemonic}' does not exist on ARMv6 "
                 "(ARM1176JZF-S)")
-            continue
-        for prefix in BARRIER_HINTS:
-            if base == prefix:
-                problems.append(
-                    f"0x{address:08x}: '{mnemonic}' is the ARMv7 hint mnemonic; "
-                    "ARMv6 must use the CP15 form (see kernel/include/lume/asm.h)")
-                break
     return problems
 
 
@@ -189,15 +226,7 @@ def main(argv: list[str]) -> int:
 
     attrs = attributes_with_readelf(path)
     if attrs:
-        arch = attrs.get("cpu_arch", "")
-        if arch and arch not in ALLOWED_CPU_ARCH:
-            failures.append(
-                f"Tag_CPU_arch is '{arch}' but the ARM1176JZF-S implements "
-                "ARMv6KZ; rebuild with -march=armv6kz -mcpu=arm1176jzf-s")
-        name = attrs.get("cpu_name", "")
-        if name and "arm1176" not in name.lower() and "arm11" not in name.lower():
-            failures.append(
-                f"Tag_CPU_name is '{name}', which is not an ARM1176/ARM11 core")
+        failures.extend(attribute_problems(attrs))
     elif args.require_attributes:
         failures.append("no ARM build attributes found (is this an ARM ELF?)")
 

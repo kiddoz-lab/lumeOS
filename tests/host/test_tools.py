@@ -18,6 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
 
+import check_isa  # noqa: E402
 import elf2bin  # noqa: E402
 import mkimage  # noqa: E402
 
@@ -107,6 +108,48 @@ class Fat16Tests(unittest.TestCase):
         with self.assertRaises(mkimage.ImageError):
             mkimage.collect_boot_files(Path("/nonexistent-firmware"),
                                        Path(__file__), [], None, None)
+
+
+class CheckIsaTests(unittest.TestCase):
+    """The ISA gate is the only thing keeping ARMv7 code out of the kernel."""
+
+    def test_accepts_the_armv6_build_attributes(self):
+        # GNU readelf synthesises a name from Tag_CPU_arch for a linked binary;
+        # llvm-readelf keeps the compiler's longer name.  Both are ARMv6KZ.
+        for attrs in (
+            {"cpu_arch": "v6KZ", "cpu_name": "6KZ"},
+            {"cpu_arch": "v6", "cpu_name": "arm1176jzf-s"},
+            {"cpu_arch": "v6KZ"},                              # name omitted
+            {"cpu_arch": "6K"},                                # v6K also OK
+        ):
+            self.assertEqual(check_isa.attribute_problems(attrs), [], attrs)
+
+    def test_rejects_the_wrong_architecture(self):
+        for arch in ("v7", "v8", "v6-M"):
+            with self.subTest(arch=arch):
+                problems = check_isa.attribute_problems({"cpu_arch": arch})
+                self.assertEqual(len(problems), 1)
+                self.assertIn("Tag_CPU_arch", problems[0])
+
+    def test_rejects_a_newer_core_name(self):
+        problems = check_isa.attribute_problems({"cpu_arch": "v6KZ",
+                                                 "cpu_name": "Cortex-A9"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Cortex-A9", problems[0])
+
+    def test_instruction_scan(self):
+        allowed = [(0x0, "add"), (0x4, "ldr"), (0x8, "cpsid"), (0xc, "mcr")]
+        self.assertEqual(check_isa.check_instructions(allowed), [])
+
+        for mnemonic in ("movw", "sdiv", "vadd.f32", "vpush"):
+            with self.subTest(mnemonic=mnemonic):
+                problems = check_isa.check_instructions([(0x0, mnemonic)])
+                self.assertTrue(problems, f"{mnemonic} must be rejected")
+
+    def test_barrier_hint_is_reported(self):
+        problems = check_isa.check_instructions([(0x0, "dmb")])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("ARMv7 hint", problems[0])
 
 
 class Elf2BinTests(unittest.TestCase):
