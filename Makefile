@@ -65,6 +65,7 @@ KERNEL_C := \
     kernel/kernel/klog.c \
     kernel/kernel/panic.c \
     kernel/kernel/string.c \
+    kernel/kernel/divmod.c \
     kernel/kernel/aeabi.c \
     kernel/kernel/sched.c \
     kernel/kernel/thread.c \
@@ -90,7 +91,8 @@ KERNEL_C := \
 
 KERNEL_S := \
     kernel/arch/arm/boot.S \
-    kernel/arch/arm/vectors.S
+    kernel/arch/arm/vectors.S \
+    kernel/arch/arm/aeabi_div.S
 
 KERNEL_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(KERNEL_C)) \
                $(patsubst %.S,$(BUILD)/%.o,$(KERNEL_S))
@@ -116,6 +118,7 @@ $(KERNEL): $(KERNEL_OBJS) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
 	$(CC) $(ARCHFLAGS) $(LDFLAGS) $(KERNEL_OBJS) -o $@
 	$(PYTHON) tools/check_isa.py $(CHECK_ISA_FLAGS) $@
+	$(PYTHON) tools/check_abi.py $(CHECK_ABI_FLAGS) $@
 
 $(KERNEL_IMG): $(KERNEL)
 	$(PYTHON) tools/elf2bin.py $< $@ --require-paddr 0x8000

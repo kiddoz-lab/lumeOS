@@ -1,30 +1,42 @@
 /*
- * LumeOS ARM EABI runtime support ("libgcc" subset).
+ * LumeOS ARM EABI runtime support (the "libgcc subset").
  *
  * The kernel is linked with -nostdlib, so the helper routines the compiler
- * expects to find (AAPCS "rtabi" helpers) have to be provided here:
+ * expects to find (AAPCS "rtabi" helpers) have to be provided:
  *
- *   - division:      __aeabi_uidiv, __aeabi_uidivmod, __aeabi_idiv,
- *                    __aeabi_idivmod, __aeabi_uldivmod, __aeabi_ldivmod
- *   - memory:        __aeabi_memcpy/memmove/memset/memclr and their
- *                    alignment-suffixed variants (4/8)
+ *   - division:  __aeabi_uidiv, __aeabi_idiv      (here)
+ *                __aeabi_uidivmod, __aeabi_idivmod,
+ *                __aeabi_uldivmod, __aeabi_ldivmod (kernel/arch/arm/aeabi_div.S)
+ *   - memory:    __aeabi_memcpy/memmove/memset/memclr and the 4/8 alignment
+ *                variants (here)
  *
- * Implementation notes:
+ * ARM1176JZF-S has no divide instruction, so the arithmetic behind all of
+ * these is the restoring division loop in kernel/kernel/divmod.c, which is
+ * portable C and therefore unit-tested on the development host.
  *
- *  - ARMv6 (ARM1176JZF-S) has no hardware divide, so integer division is a
- *    shift/subtract (restoring) loop.  The EABI returns a multi-word result in
- *    r0:r1 / r0-r3; the AAPCS returns a structure of up to four words in
- *    exactly those registers, so a structure return expresses the calling
- *    convention directly instead of needing hand-written assembly.
+ * IMPORTANT (this cost one boot in QEMU):
  *
- *  - The memory helpers use byte loops on purpose: the compiler is allowed to
- *    turn a "copy n bytes" loop into a call to __aeabi_memcpy, which would
- *    recurse forever.  -fno-builtin already prevents that, but these helpers
- *    must not depend on it.
+ * The rtabi helper names have a fixed register-level calling convention taken
+ * from the public "Run-time ABI for the ARM Architecture" addendum, and that
+ * convention is *not* whatever the C compiler would pick for an equivalent C
+ * function.  In particular clang/LLVM for this target returns every composite
+ * type in memory through a hidden pointer (sret), even a two-word struct, so
+ * writing __aeabi_uldivmod as a C function returning `struct {u64,u64}` gives
+ * a routine that reads its divisor from the stack and writes the result
+ * through r0 - while its callers pass the operands in r0-r3 and read the
+ * results back from r0-r3.  The mis-read divisor happened to be zero and the
+ * kernel panicked with "64-bit division by zero" before the console existed.
  *
- * The helper names and register conventions come from the public "Run-time
- * ABI for the ARM Architecture" addendum, not from any operating system.
+ * Hence: scalar in / scalar out helpers stay in C, and anything whose rtabi
+ * convention is fixed and multi-register lives in assembly
+ * (kernel/arch/arm/aeabi_div.S).
+ *
+ * The memory helpers use byte loops on purpose: the compiler is allowed to
+ * turn a "copy n bytes" loop into a call to __aeabi_memcpy, which would
+ * recurse forever.  -fno-builtin already prevents that, but these helpers must
+ * not depend on it.
  */
+#include <lume/divmod.h>
 #include <lume/panic.h>
 #include <lume/types.h>
 
@@ -32,161 +44,30 @@
 /* 32-bit division                                                     */
 /* ------------------------------------------------------------------ */
 
-struct u32_divmod {
-    u32 quot;
-    u32 rem;
-};
-
-struct s32_divmod {
-    s32 quot;
-    s32 rem;
-};
-
-static struct u32_divmod udivmod32(u32 num, u32 den)
-{
-    struct u32_divmod r = { 0, 0 };
-
-    if (den == 0)
-        panic("division by zero");
-
-    for (int bit = 31; bit >= 0; bit--) {
-        u32 carry = r.rem >> 31;              /* bit shifted out of the remainder */
-
-        r.quot <<= 1;
-        r.rem = (r.rem << 1) | ((num >> bit) & 1u);
-        if (carry || r.rem >= den) {
-            /* Subtracting in 32-bit arithmetic is still correct when the
-             * remainder overflowed: the true value is at most 2*den-1, so the
-             * low 32 bits of (true - den) are the real remainder. */
-            r.rem -= den;
-            r.quot |= 1u;
-        }
-    }
-    return r;
-}
-
 u32 __aeabi_uidiv(u32 num, u32 den);
 u32 __aeabi_uidiv(u32 num, u32 den)
 {
-    return udivmod32(num, den).quot;
-}
+    u32 quot, rem;
 
-/* Quotient in r0, remainder in r1 (EABI convention). */
-struct u32_divmod __aeabi_uidivmod(u32 num, u32 den);
-struct u32_divmod __aeabi_uidivmod(u32 num, u32 den)
-{
-    return udivmod32(num, den);
+    lume_udivmod32(num, den, &quot, &rem);
+    return quot;
 }
 
 s32 __aeabi_idiv(s32 num, s32 den);
 s32 __aeabi_idiv(s32 num, s32 den)
 {
-    u32 unum = (u32)num, uden = (u32)den;
-    int negative = 0;
+    s32 quot, rem;
 
-    if (num < 0) {
-        unum = (u32)0 - (u32)num;
-        negative = !negative;
-    }
-    if (den < 0) {
-        uden = (u32)0 - (u32)den;
-        negative = !negative;
-    }
-
-    u32 quot = udivmod32(unum, uden).quot;
-    return negative ? (s32)((u32)0 - quot) : (s32)quot;
+    lume_idivmod32(num, den, &quot, &rem);
+    return quot;
 }
 
-struct s32_divmod __aeabi_idivmod(s32 num, s32 den);
-struct s32_divmod __aeabi_idivmod(s32 num, s32 den)
+/* Policy hook used by the portable cores: a zero divisor has no defined
+ * result, so the kernel treats it as a bug. */
+void lume_div_by_zero(const char *width);
+void lume_div_by_zero(const char *width)
 {
-    struct s32_divmod r;
-    u32 unum = (u32)num, uden = (u32)den;
-    int quot_negative = 0;
-
-    if (num < 0) {
-        unum = (u32)0 - (u32)num;
-        quot_negative = !quot_negative;
-    }
-    if (den < 0) {
-        uden = (u32)0 - (u32)den;
-        quot_negative = !quot_negative;
-    }
-
-    struct u32_divmod u = udivmod32(unum, uden);
-
-    r.quot = quot_negative ? (s32)((u32)0 - u.quot) : (s32)u.quot;
-    /* C99: the remainder takes the sign of the dividend. */
-    r.rem = (num < 0) ? (s32)((u32)0 - u.rem) : (s32)u.rem;
-    return r;
-}
-
-/* ------------------------------------------------------------------ */
-/* 64-bit division                                                     */
-/* ------------------------------------------------------------------ */
-
-struct u64_divmod {
-    u64 quot;
-    u64 rem;
-};
-
-struct s64_divmod {
-    s64 quot;
-    s64 rem;
-};
-
-static struct u64_divmod udivmod64(u64 num, u64 den)
-{
-    struct u64_divmod r = { 0, 0 };
-
-    if (den == 0)
-        panic("64-bit division by zero");
-
-    int top = 63;
-    while (top > 0 && ((num >> top) & 1u) == 0)
-        top--;
-
-    for (int bit = top; bit >= 0; bit--) {
-        u64 carry = r.rem >> 63;
-
-        r.quot <<= 1;
-        r.rem = (r.rem << 1) | ((num >> bit) & 1u);
-        if (carry || r.rem >= den) {
-            r.rem -= den;
-            r.quot |= 1u;
-        }
-    }
-    return r;
-}
-
-/* Quotient in r0:r1, remainder in r2:r3 (EABI convention). */
-struct u64_divmod __aeabi_uldivmod(u64 num, u64 den);
-struct u64_divmod __aeabi_uldivmod(u64 num, u64 den)
-{
-    return udivmod64(num, den);
-}
-
-struct s64_divmod __aeabi_ldivmod(s64 num, s64 den);
-struct s64_divmod __aeabi_ldivmod(s64 num, s64 den)
-{
-    struct s64_divmod r;
-    u64 unum = (u64)num, uden = (u64)den;
-    int quot_negative = 0;
-
-    if (num < 0) {
-        unum = (u64)0 - (u64)num;
-        quot_negative = !quot_negative;
-    }
-    if (den < 0) {
-        uden = (u64)0 - (u64)den;
-        quot_negative = !quot_negative;
-    }
-
-    struct u64_divmod u = udivmod64(unum, uden);
-
-    r.quot = quot_negative ? (s64)((u64)0 - u.quot) : (s64)u.quot;
-    r.rem = (num < 0) ? (s64)((u64)0 - u.rem) : (s64)u.rem;
-    return r;
+    panic("division by zero (%s)", width);
 }
 
 /* ------------------------------------------------------------------ */

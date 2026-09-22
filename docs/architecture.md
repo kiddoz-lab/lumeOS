@@ -143,13 +143,57 @@ not the userspace shell.
   implemented in `kernel/kernel/aeabi.c` (`__aeabi_uidiv`, `memcpy` family...).
 * `-ffreestanding -fno-builtin -fno-stack-protector -mno-unaligned-access`,
   `-mfloat-abi=soft`, `-march=armv6kz -mcpu=arm1176jzf-s`.
-* Every build runs `tools/check_isa.py`: it checks the ARM build attributes and
-  disassembles every executable section with capstone to reject instructions the
-  ARM1176JZF-S cannot execute. CI passes `--require-capstone` so the gate cannot
-  silently degrade into a no-op.
+* Every build runs two static gates on the linked ELF:
+  * `tools/check_isa.py` checks the ARM build attributes and disassembles every
+    executable section with capstone to reject instructions the ARM1176JZF-S
+    cannot execute. It steps over literal pools (`skipdata`); capstone stops at
+    the first undecodable word, which once limited the scan to 235 of 10231
+    instructions and turned the gate into a prefix check.
+  * `tools/check_abi.py` checks the EABI division helpers against the fixed
+    rtabi layout (see below).
+  CI passes `--require-capstone` to both so neither gate can silently degrade
+  into a no-op.
 * No floating point anywhere in the kernel.
 * Hardware register access goes through `kernel/include/lume/hw/bcm2835.h`
   constants and one accessor macro per driver; no magic numbers in C files.
+  Peripherals are *not* in the RAM alias window: `PHYS_TO_VIRT()` (0xC0000000 +
+  physical) is for RAM only, and register addresses must go through
+  `PERIPHERAL_TO_VIRT()` (0xF0000000 + offset from 0x20000000), because that is
+  where `boot.S` maps them. Using the RAM alias compiles fine and faults at
+  runtime before any console exists.
+
+### The two ARM calling conventions, and why the EABI helpers are assembly
+
+The compiler emits calls to `__aeabi_uidiv`, `__aeabi_uldivmod` and friends
+with the register layout fixed by the public *Run-time ABI for the ARM
+Architecture* addendum: operands in r0-r3 and, for the multi-word helpers,
+quotient in r0:r1 and remainder in r2:r3.
+
+That is **not** what this toolchain does for an equivalent C function. LLVM
+returns every composite type in memory through a hidden pointer in r0 ("sret"),
+even a two-word struct. So a helper written as
+
+```c
+struct u64_divmod __aeabi_uldivmod(u64 num, u64 den);   /* WRONG */
+```
+
+gets a body that reads its divisor from a stack slot nobody wrote and returns
+its result into `*(u64 *)num`, while its callers pass the operands in r0-r3 and
+read the results back from r0-r3. Nothing warns; the linker is happy; the kernel
+panics with "64-bit division by zero" while the divisor it was handed was 1000.
+
+Consequences, both enforced by tools:
+
+* the multi-register helpers live in `kernel/arch/arm/aeabi_div.S` and only
+  marshal registers, calling the portable cores in `kernel/kernel/divmod.c`;
+* `tools/check_abi.py` disassembles the linked kernel and fails the build if an
+  EABI helper stores its result through r0, or if a call site dereferences r0
+  straight after a multi-word call.
+
+The same rule applies to any future interface whose ABI is defined outside this
+tree - most importantly the syscall entry point: the ARM Linux syscall ABI uses
+registers and caller-provided pointers, never register-returned structs, which
+is fortunately the same shape.
 
 ## Known weaknesses
 

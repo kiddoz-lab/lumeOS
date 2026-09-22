@@ -19,6 +19,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
 
+import check_abi  # noqa: E402
 import check_isa  # noqa: E402
 import elf2bin  # noqa: E402
 import mkimage  # noqa: E402
@@ -276,3 +277,94 @@ class Elf2BinTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckAbiTests(unittest.TestCase):
+    """The EABI helpers must use the fixed rtabi register layout.
+
+    This is the bug class that cost one boot in QEMU: a helper written as a C
+    function returning `struct {u64,u64}` compiles to the compiler's own
+    composite-return convention (a hidden pointer in r0), while every call site
+    uses the register layout fixed by the ARM run-time ABI addendum.  The
+    mismatch is invisible to the compiler and to the linker.
+    """
+
+    # Hand-encoded, capstone-verified ARM instructions (little-endian words).
+    ENCODINGS = {
+        "push {r4, lr}": 0xE92D4010,
+        "sub sp, sp, #32": 0xE24DD020,
+        "str r0, [sp]": 0xE58D0000,
+        "mov r0, sp": 0xE1A0000D,
+        "add r1, sp, #8": 0xE28D1008,
+        "ldr r0, [sp, #16]": 0xE59D0010,
+        "pop {r4, pc}": 0xE8BD8010,
+        "mov r4, r0": 0xE1A04000,
+        "str r4, [r0, #8]": 0xE5804008,
+        "stm r0, {r6, r8}": 0xE8800140,
+        "ldr r0, [r0]": 0xE5900000,
+        "bl #0xf8": 0xEB00003C,
+    }
+
+    @staticmethod
+    def bl_words(from_addr, to_addr):
+        """Encode `bl` from one address to another (ARM B/BL, 24-bit offset)."""
+        offset = (to_addr - from_addr - 8) // 4
+        return 0xEB000000 | (offset & 0xFFFFFF)
+
+    def instructions(self, items, base=0x1000):
+        import capstone
+        import struct
+
+        words = [self.ENCODINGS[i] if isinstance(i, str) else i for i in items]
+        code = b"".join(struct.pack("<I", w) for w in words)
+        md = capstone.Cs(capstone.CS_ARCH_ARM,
+                         capstone.CS_MODE_ARM | capstone.CS_MODE_LITTLE_ENDIAN)
+        md.skipdata = True
+        return [insn for insn in md.disasm(code, base) if insn.id != 0]
+
+    def test_rtabi_thunk_is_accepted(self):
+        insns = self.instructions([
+            "push {r4, lr}", "sub sp, sp, #32", "str r0, [sp]",
+            "mov r0, sp", "add r1, sp, #8", "bl #0xf8",
+            "ldr r0, [sp, #16]", "pop {r4, pc}",
+        ])
+        funcs = [(0x1000, 0x20, "__aeabi_uldivmod")]
+        self.assertEqual(check_abi.problems_for(insns, funcs), [])
+
+    def test_sret_helper_is_rejected(self):
+        # The shape clang generates for a composite return: the result is
+        # written through the pointer that arrives in r0.
+        insns = self.instructions([
+            "push {r4, lr}", "mov r4, r0", "str r4, [r0, #8]", "pop {r4, pc}",
+        ])
+        funcs = [(0x1000, 0x10, "__aeabi_uldivmod")]
+        problems = check_abi.problems_for(insns, funcs)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("stores its result through r0", problems[0])
+
+    def test_store_multiple_through_r0_is_rejected(self):
+        insns = self.instructions(["push {r4, lr}", "stm r0, {r6, r8}"])
+        problems = check_abi.problems_for(
+            insns, [(0x1000, 0x8, "__aeabi_uldivmod")])
+        self.assertTrue(problems, "stm r0 must be recognised as an sret store")
+
+    def test_caller_dereferencing_r0_after_a_call_is_rejected(self):
+        # Caller at 0x1000 calls the helper at 0x2000, then treats r0 as a
+        # pointer to the result - which the EABI never promises.
+        insns = self.instructions([self.bl_words(0x1000, 0x2000), "ldr r0, [r0]"],
+                                  base=0x1000)
+        problems = check_abi.problems_for(
+            insns, [(0x2000, 0x20, "__aeabi_uldivmod")])
+        self.assertTrue(problems, "reading [r0] after the call is not the EABI way")
+        self.assertIn("dereferences r0", problems[0])
+
+    def test_built_kernel_helpers_are_clean(self):
+        """Integration check against the real linked kernel, when it exists."""
+        elf = REPO / "build" / "lumeos.elf"
+        if not elf.is_file():
+            self.skipTest("build/lumeos.elf not built (run 'make kernel' first)")
+        try:
+            problems = check_abi.helper_problems(elf)
+        except check_abi.CapstoneMissing as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(problems, [])

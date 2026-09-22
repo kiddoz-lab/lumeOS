@@ -149,6 +149,53 @@ static void test_proc(void)
     check("thread table", thread_count() >= 1);
 }
 
+/*
+ * Division goes through the compiler's runtime helpers (__aeabi_uidiv,
+ * __aeabi_uldivmod, ...) because ARM1176JZF-S has no divide instruction, so
+ * every check here also exercises the EABI register marshalling in
+ * kernel/arch/arm/aeabi_div.S.  A wrong convention shows up as a bogus result
+ * or as a panic; both are caught by tests/qemu/run_qemu_test.py.
+ */
+static void test_division(void)
+{
+    char buf[32];
+
+    check("u32 div", 1000000u / 7u == 142857u);
+    check("u32 mod", 1000000u % 7u == 1u);
+    check("u32 div max", 0xFFFFFFFFu / 0x10000u == 65535u);
+    check("s32 div", -7 / 2 == -3);
+    check("s32 mod", -7 % 2 == -1);
+
+    {
+        u64 n = 10000000000ull;         /* needs the 64-bit helper */
+        u64 q = n / 7ull;
+        u64 r = n % 7ull;
+
+        check("u64 div", q == 1428571428ull);
+        check("u64 mod", r == 4ull);
+        ksnprintf(buf, sizeof(buf), "%llu", (unsigned long long)q);
+        check("u64 div formats", strcmp(buf, "1428571428") == 0);
+    }
+
+    {
+        u64 n = 0xC000000000000000ull;  /* must not lose the top bit */
+        u64 q = n / 2ull;
+
+        check("u64 top-bit div", q == 0x6000000000000000ull);
+    }
+
+    {
+        s64 n = -10000000001ll;
+        s64 q = n / 3ll;
+        s64 r = n % 3ll;
+
+        check("s64 div", q == -3333333333ll);
+        check("s64 mod", r == -2ll);    /* C99: sign of the dividend */
+    }
+
+    check("u64 mul", 0x100000000ull * 3ull == 0x300000000ull);
+}
+
 void selftest_run(void)
 {
     tests_run = 0;
@@ -157,6 +204,7 @@ void selftest_run(void)
     pr_notice("selftest: running kernel self tests");
 
     test_strings();
+    test_division();
     test_pmm();
     test_kmalloc();
     test_timer();

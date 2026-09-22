@@ -53,7 +53,12 @@ ARMV7_ONLY = {
     "movw", "movt", "lda", "ldab", "ldah", "ldaex", "stl", "stlb", "stlh",
     "vldr", "vstr", "vldm", "vstm", "vpush", "vpop", "vmov", "vadd", "vsub",
     "vmul", "vdiv", "vcvt", "vmla", "vmrs", "vmsr", "vabs", "vneg", "vcmp",
-    "sxtb16", "uxtb16", "sxtab", "uxtab", "sxtah", "uxtah",
+    # The extend-and-add instructions (SXTAB/UXTAB/SXTAH/UXTAH) are ARMv6, not
+    # ARMv7: the compiler emits UXTAB for -mcpu=arm1176jzf-s, and treating it
+    # as forbidden made this check fail on its own output.  The *16 forms below
+    # are the ARMv6 DSP/SIMD variants, which ARM1176JZF-S does not implement -
+    # LLVM agrees and refuses to emit them for this CPU.
+    "sxtb16", "uxtb16",
 }
 
 # Tag_CPU_name is informational and tools disagree about it.  GNU readelf
@@ -124,15 +129,20 @@ def sections(path: Path) -> list[tuple[str, int, int, int]]:
     return result
 
 
-def executable_bytes(path: Path) -> bytes:
-    """Concatenate the contents of the executable sections."""
+def executable_sections(path: Path) -> list[tuple[int, bytes]]:
+    """Return (virtual address, contents) for each executable section."""
     data = path.read_bytes()
-    out = bytearray()
+    out = []
     for _name, sh_type, sh_flags, sh_off, sh_size in sections(path):
         if sh_type == SHT_NOBITS or not sh_flags & SHF_EXECINSTR or sh_size == 0:
             continue
-        out += data[sh_off:sh_off + sh_size]
-    return bytes(out)
+        out.append((sh_off, data[sh_off:sh_off + sh_size]))
+    return out
+
+
+def executable_bytes(path: Path) -> bytes:
+    """Concatenate the contents of the executable sections."""
+    return b"".join(chunk for _off, chunk in executable_sections(path))
 
 
 def attributes_with_readelf(path: Path) -> dict[str, str]:
@@ -161,7 +171,19 @@ class CapstoneMissing(CheckError):
     """Raised when the ISA check cannot run because capstone is not installed."""
 
 
-def disassemble(code: bytes) -> list[tuple[int, str]]:
+def disassemble(code: bytes, base: int = 0) -> list[tuple[int, str]]:
+    """Disassemble ARM code, stepping over data instead of stopping at it.
+
+    capstone's ARM decoder ends the scan at the first word it cannot decode.
+    The kernel image contains literal pools and (in .text.boot) tables inside
+    executable sections, so the naive loop used to stop after a few hundred
+    instructions - 235 out of 10231 on the first real kernel - and the ISA
+    check silently degenerated into a check of the first few hundred bytes.
+
+    With `skipdata` capstone emits `.byte` pseudo-instructions for anything it
+    cannot decode; those are dropped here so they are neither flagged as
+    forbidden instructions nor counted as decoded code.
+    """
     try:
         import capstone  # type: ignore
     except ImportError as exc:
@@ -172,8 +194,11 @@ def disassemble(code: bytes) -> list[tuple[int, str]]:
     md = capstone.Cs(capstone.CS_ARCH_ARM,
                      capstone.CS_MODE_ARM | capstone.CS_MODE_LITTLE_ENDIAN)
     md.detail = False
+    md.skipdata = True
     instructions = []
-    for insn in md.disasm(code, 0):
+    for insn in md.disasm(code, base):
+        if insn.id == 0:            # '.byte' - embedded data, not an instruction
+            continue
         instructions.append((insn.address, insn.mnemonic.lower()))
     return instructions
 

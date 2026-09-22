@@ -11,6 +11,7 @@
  * The file uses the same headers as the kernel, so a mismatch between a header
  * and its implementation shows up here first.
  */
+#include <lume/divmod.h>
 #include <lume/string.h>
 #include <lume/types.h>
 
@@ -171,10 +172,85 @@ static void check_strings(void)
     expect("itoa", num, "-321");
 }
 
+/*
+ * The division cores behind the ARM EABI helpers.  On the host these are the
+ * *same* source lines that run on the Pi (kernel/kernel/divmod.c); what the
+ * host cannot check is the register marshalling in
+ * kernel/arch/arm/aeabi_div.S, which only the in-kernel self tests under QEMU
+ * exercise.  The 32-bit cases still go through the host compiler's own
+ * division, so they also prove the cores agree with the C language rules.
+ */
+static int zero_divisions;
+
+void lume_div_by_zero(const char *width)
+{
+    (void)width;
+    zero_divisions++;
+}
+
+static void check_division(void)
+{
+    u32 uq, ur;
+    s32 sq, sr;
+    u32 num64[2], den64[2], out64[4];
+
+    lume_udivmod32(1000000u, 7u, &uq, &ur);
+    expect_int("udivmod32 quot", (long)uq, 142857);
+    expect_int("udivmod32 rem", (long)ur, 1);
+
+    lume_udivmod32(0xFFFFFFFFu, 0x10000u, &uq, &ur);
+    expect_int("udivmod32 max quot", (long)uq, 65535);
+    expect_int("udivmod32 max rem", (long)ur, 65535);
+
+    lume_idivmod32(-7, 2, &sq, &sr);
+    expect_int("idivmod32 quot", sq, -3);
+    expect_int("idivmod32 rem", sr, -1);      /* C99: sign of the dividend */
+
+    lume_idivmod32(7, -2, &sq, &sr);
+    expect_int("idivmod32 neg den quot", sq, -3);
+    expect_int("idivmod32 neg den rem", sr, 1);
+
+    /* 0xC0000000_00000000 / 2 must not lose the top bit. */
+    num64[0] = 0x00000000u; num64[1] = 0xC0000000u;
+    den64[0] = 2u;          den64[1] = 0u;
+    lume_udivmod64(num64, den64, out64);
+    expect_int("udivmod64 top-bit quot low", (long)out64[0], 0);
+    expect_int("udivmod64 top-bit quot high", (long)out64[1], 0x60000000);
+    expect_int("udivmod64 top-bit rem", (long)out64[2], 0);
+
+    /* 10000000000 / 7 = 1428571428 rem 4 (the value the old code divided). */
+    num64[0] = 10000000000ull & 0xFFFFFFFFu;
+    num64[1] = (u32)(10000000000ull >> 32);
+    den64[0] = 7u; den64[1] = 0u;
+    lume_udivmod64(num64, den64, out64);
+    expect_int("udivmod64 1e10 quot", (long)out64[0], 1428571428);
+    expect_int("udivmod64 1e10 rem", (long)out64[2], 4);
+
+    /* -1 / 2 = 0 rem -1, and it must not report a zero divisor. */
+    num64[0] = 0xFFFFFFFFu; num64[1] = 0xFFFFFFFFu;
+    den64[0] = 2u; den64[1] = 0u;
+    lume_ldivmod64(num64, den64, out64);
+    expect_int("ldivmod64 -1/2 quot", (long)out64[0], 0);
+    expect_int("ldivmod64 -1/2 rem", (long)out64[2], 0xFFFFFFFF);
+    expect_int("ldivmod64 -1/2 sign", (long)out64[3], 0xFFFFFFFF);
+
+    /* Division by zero calls the hook and yields zero, not garbage. */
+    zero_divisions = 0;
+    lume_udivmod32(1u, 0u, &uq, &ur);
+    expect_int("udiv32 by zero hook", zero_divisions, 1);
+    expect_int("udiv32 by zero quot", (long)uq, 0);
+
+    num64[1] = 0; den64[0] = 0; den64[1] = 0;
+    lume_udivmod64(num64, den64, out64);
+    expect_int("udiv64 by zero hook", zero_divisions, 2);
+    expect_int("udiv64 by zero quot", (long)out64[0], 0);
+}
+
 int main(void)
 {
     check_formatting();
     check_strings();
+    check_division();
 
     printf("ktest: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

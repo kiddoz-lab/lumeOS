@@ -31,6 +31,10 @@ SOURCES = [
     REPO / "tests" / "host" / "ktest_main.c",
     REPO / "kernel" / "kernel" / "printf.c",
     REPO / "kernel" / "kernel" / "string.c",
+    # The division cores behind the ARM EABI helpers.  The assembly thunks
+    # that give them their rtabi register layout are ARM-only and therefore
+    # exercised by the in-kernel self tests under QEMU, not here.
+    REPO / "kernel" / "kernel" / "divmod.c",
 ]
 
 HOST_CFLAGS = [
