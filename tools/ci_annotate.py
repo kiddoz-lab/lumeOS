@@ -16,8 +16,18 @@ failure into two): it always exits 0.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
+
+# Lines that usually carry the real reason a build step failed.  make echoes
+# every compiler command line, so a plain "last N lines" tail is mostly useless
+# noise; these patterns pick out the diagnosis instead.
+ERROR_PATTERNS = re.compile(
+    r"(error:|Error \d|undefined reference|undefined symbol|cannot find|"
+    r"no such file|collect2|FAILED|FAIL:|Traceback|AssertionError|"
+    r"unrecognized|not found|Permission denied)",
+    re.IGNORECASE)
 
 
 def escape(message: str) -> str:
@@ -32,9 +42,14 @@ def main(argv: list[str]) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("logfile", help="log file to read")
     parser.add_argument("--lines", type=int, default=30,
-                        help="how many trailing lines to publish")
+                        help="how many trailing lines to publish when nothing "
+                             "looks like an error")
+    parser.add_argument("--error-lines", type=int, default=25,
+                        help="how many matching error lines to publish")
     parser.add_argument("--title", default="", help="annotation title")
-    parser.add_argument("--max-chars", type=int, default=6000)
+    # GitHub truncates an annotation message at 4096 characters and keeps the
+    # beginning, so stay clearly below that and put the diagnosis first.
+    parser.add_argument("--max-chars", type=int, default=3500)
     args = parser.parse_args(argv)
 
     path = Path(args.logfile)
@@ -44,10 +59,20 @@ def main(argv: list[str]) -> int:
         return 0
 
     text = path.read_text(errors="replace")
-    lines = text.splitlines()
-    tail = "\n".join(lines[-args.lines:]).strip()
-    if not tail:
-        tail = "(log file is empty)"
+    lines = [line for line in text.splitlines() if line.strip()]
+
+    matches = [line for line in lines if ERROR_PATTERNS.search(line)]
+    if matches:
+        selected = matches[-args.error_lines:]
+        header = (f"{len(matches)} line(s) matched the error patterns; "
+                  f"showing the last {len(selected)}\n")
+    else:
+        selected = lines[-args.lines:]
+        header = ""
+
+    tail = header + "\n".join(selected)
+    if not tail.strip() or not selected:
+        tail = "(log file is empty or has no matching errors)"
     if len(tail) > args.max_chars:
         tail = "...(truncated)...\n" + tail[-args.max_chars:]
 

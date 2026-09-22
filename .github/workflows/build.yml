@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0          # LUME_BUILD_COMMIT is embedded in the kernel
 
@@ -63,12 +63,25 @@ jobs:
       - name: Build the kernel (build/kernel.img)
         run: |
           set -o pipefail
-          if ! make kernel 2>&1 | tee build-kernel.log; then
+          if ! make -j"$(nproc)" kernel 2>&1 | tee build-kernel.log; then
             # Make the real error readable through the checks API as well as
             # the log viewer.
             python3 tools/ci_annotate.py build-kernel.log --title "make kernel"
             exit 1
           fi
+
+      - name: Upload the build logs (only if something failed)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-logs
+          path: |
+            build-kernel.log
+            host-tests.log
+            build-image.log
+            qemu-test.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Show the kernel image layout
         run: |
@@ -105,7 +118,7 @@ jobs:
 
       - name: Upload the SD card image
         if: steps.image.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lumeos-sd-image
           path: build/lumeos-sd.img
@@ -113,7 +126,7 @@ jobs:
           retention-days: 30
 
       - name: Upload the kernel images and the ELF
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lumeos-kernel
           path: |
