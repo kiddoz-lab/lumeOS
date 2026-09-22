@@ -121,9 +121,11 @@ def main(argv: list[str]) -> int:
                      (exc.stdout or b"").decode("utf-8", "replace")
             exit_note = f"QEMU was still running after {args.timeout:g}s"
 
+        summary: dict[str, object] = {"strategy": args.strategy, "note": exit_note}
         print(f"DIAG: strategy '{args.strategy}', {exit_note}")
         print(f"DIAG: serial output: {len(serial)} bytes"
               + (f", first 120: {serial[:120]!r}" if serial else " (nothing printed)"))
+        summary["serial bytes"] = len(serial)
 
         if not log_path.is_file():
             print("DIAG: QEMU wrote no debug log")
@@ -163,12 +165,12 @@ def main(argv: list[str]) -> int:
                     path.append(name)
             print(f"DIAG: first 6 blocks: "
                   + " | ".join(short(a) for a in executed[:6]))
-            print(f"DIAG: last 12 blocks (address: symbol):")
-            for addr in executed[-args.blocks:]:
-                print(f"DIAG:   0x{addr:08x}  {short(addr)}")
-            print(f"DIAG: execution path ({len(path)} distinct blocks, last 30):")
-            for name in path[-30:]:
+            print(f"DIAG: last {args.blocks} distinct blocks:")
+            for name in path[-args.blocks:]:
                 print(f"DIAG:   {name}")
+            summary["last block"] = short(executed[-1])
+            summary["blocks"] = len(executed)
+            print(f"DIAG: {len(path)} distinct blocks executed")
         else:
             print("DIAG: no guest code was translated at all - the CPU never "
                   "started executing at the expected entry point")
@@ -178,6 +180,10 @@ def main(argv: list[str]) -> int:
                 or "exception" in line.lower() and line.startswith("IN:")]
         take = [i for i, line in enumerate(lines) if "Taking exception" in line]
         print(f"DIAG: exceptions taken: {len(take)}")
+        summary["exceptions"] = len(take)
+        if take:
+            summary["first exception"] = lines[take[0]].strip()[:120]
+            summary["last exception"] = lines[take[-1]].strip()[:120]
         for index in take[:3]:
             for line in lines[index:index + 8]:
                 stripped = line.strip()
@@ -201,6 +207,7 @@ def main(argv: list[str]) -> int:
         bad = [line for line in lines
                if "unimp" in line.lower() or "unassigned" in line.lower()]
         print(f"DIAG: unimplemented/unassigned accesses: {len(bad)}")
+        summary["qemu unimp/unassigned"] = len(bad)
         for line in bad[:8]:
             print(f"DIAG:   {line.strip()[:160]}")
 
@@ -208,6 +215,17 @@ def main(argv: list[str]) -> int:
         print("DIAG: last 6 log lines:")
         for line in lines[-6:]:
             print(f"DIAG:   {line.strip()[:160]}")
+
+        # ---- summary last, on purpose ----
+        # CI lifts the *tail* of this output into a GitHub annotation, which is
+        # capped at a few kilobytes, so the most useful facts are repeated here
+        # where truncation cannot reach them.
+        print("DIAG: ---- summary ----")
+        for key in ("strategy", "note", "serial bytes", "blocks",
+                    "qemu unimp/unassigned", "exceptions", "first exception",
+                    "last exception", "last block"):
+            if key in summary:
+                print(f"DIAG: {key}: {summary[key]}")
 
     return 0
 

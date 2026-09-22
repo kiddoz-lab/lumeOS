@@ -1,5 +1,16 @@
 # LumeOS architecture
 
+This is the design document: how the kernel is put together and why. The other
+documents go deeper on specific areas:
+
+* [building.md](building.md) - toolchains, targets, the static gates, troubleshooting
+* [testing.md](testing.md) - what is tested and what each test does not prove
+* [hardware.md](hardware.md) - the board, flashing, the serial console
+* [boot-pi.md](boot-pi.md) - the firmware boot chain and the assumptions LumeOS makes
+* [userspace.md](userspace.md) - the ARM Linux ABI plan
+* [roadmap.md](roadmap.md) - milestones and the known bugs at the current head
+* [research-notes.md](research-notes.md) - the public references behind the implementation
+
 This document describes how the kernel is put together today. Everything
 labelled *unverified* is code that exists and compiles but has never executed
 on a CPU - see [testing.md](testing.md) for the evidence status of each layer.

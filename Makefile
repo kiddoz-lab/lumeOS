@@ -149,9 +149,13 @@ help:
 	@echo "LumeOS build targets:"
 	@echo "  all         - build the kernel and the SD card image"
 	@echo "  kernel      - build build/kernel.img (Raspberry Pi kernel image)"
-	@echo "  userspace   - build LumeOS native userspace programs"
 	@echo "  image       - build build/lumeos-sd.img (bootable SD card image)"
 	@echo "  test-host   - run host-side unit tests"
 	@echo "  test-qemu   - boot the kernel under QEMU (raspi0) and check output"
+	@echo "  test        - alias for test-host"
+	@echo "  firmware    - download the Raspberry Pi boot firmware into .firmware"
+	@echo ""
+	@echo "There is no 'userspace' target yet: userspace/ does not exist."
+	@echo "The plan is in docs/userspace.md and docs/roadmap.md."
 
 -include $(KERNEL_OBJS:.o=.d)

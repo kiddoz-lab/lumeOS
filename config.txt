@@ -16,6 +16,18 @@ kernel=kernel.img
 # (kernel/ld/lumeos.ld: LMA 0x8000, VMA 0xC0008000).
 kernel_address=0x8000
 
+# Enable the serial port.  On a board with onboard Bluetooth (Pi Zero W, Pi 3,
+# ...) the *primary* UART that this enables is the mini UART, not the PL011, so
+# the next option matters as well.
+enable_uart=1
+
+# LumeOS drives the PL011 (UART0, base 0x20201000).  On a Pi Zero W the PL011 is
+# wired to the Bluetooth modem by default, so it has to be handed back to
+# GPIO14/15 for the kernel's console to be visible on the header.  Without this
+# line a perfectly working kernel prints into the Bluetooth chip.
+# See docs/hardware.md and docs/boot-pi.md.
+dtoverlay=disable-bt
+
 # LumeOS does not read ATAGS or a command line from the firmware: memory sizes
 # come from the mailbox property interface (GET_ARM_MEMORY) and the kernel
 # command line is empty.  This stops start.elf from writing an ATAGS block into

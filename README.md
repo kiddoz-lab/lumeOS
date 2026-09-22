@@ -30,12 +30,13 @@ exists and is checked to the extent an emulator and a host machine allow.
 | Build system, linker script, ISA gate | works, verified locally and in CI |
 | Flat `kernel.img` at load address `0x8000` | works, verified in CI |
 | Bootable SD image (MBR + FAT16 + firmware) | built by CI as an artifact |
-| Host unit tests (`printf`, string library, image tooling) | 16 tests pass |
-| In-kernel self tests | written, run on every boot; **not yet observed running** |
-| Boot stub, MMU, caches, high vectors | written, **unverified on hardware or in QEMU** |
-| Exceptions, IRQs, system timer, scheduler | written, **unverified** |
-| Serial console (PL011, 115200 8N1) | written, **unverified** |
-| Kernel shell | written, **unverified** |
+| Host unit tests (`printf`, string library, division cores, build tools, both gates) | 23 tests pass locally and in CI |
+| Static gates (ARMv6 ISA, EABI calling convention) | pass on every build; enforced in CI |
+| In-kernel self tests (43 checks) | written and run on every boot; **results not yet observed** |
+| Boot stub, MMU, caches, high vectors | 🟡 executes under QEMU; **unverified on hardware** |
+| Exceptions, IRQs, system timer, scheduler | 🟡 reached under QEMU; the boot then fails in the interrupt path (**unverified on hardware**) |
+| Serial console (PL011, 115200 8N1) | 🟡 prints under QEMU; **unverified on hardware** |
+| Kernel shell | 🟡 written, never interacted with |
 | Framebuffer / input / storage / networking | **not implemented** |
 | Userspace: ELF loader, syscalls, VFS, processes | **not implemented** (`main.c` prints that the hand-off is missing instead of pretending) |
 
@@ -56,9 +57,12 @@ make test-host
 python3 tools/check_isa.py --require-attributes --require-capstone build/lumeos.elf
 
 # 3. Build a flashable SD card image (needs the Raspberry Pi boot firmware)
-sh tools/fetch-firmware.sh .firmware
-make image
-#    -> build/lumeos-sd.img
+make firmware                    # downloads bootcode.bin, start.elf, fixup.dat
+make image                       # -> build/lumeos-sd.img (structure verified)
+
+# 4. Optional: boot it under QEMU (needs qemu-system-arm; currently expected to
+#    fail part-way - see docs/testing.md - so it is not part of the default build)
+make test-qemu
 ```
 
 Full details, including the no-root toolchain fallback, are in
@@ -72,6 +76,9 @@ Full details, including the no-root toolchain fallback, are in
   `config.txt` and `kernel.img`: write it to a microSD card and the board has
   everything it needs to try to boot LumeOS
 
+CI builds all three and publishes the image as an artifact, so you can flash a
+build without a local toolchain.
+
 ## Repository layout
 
 ```
@@ -84,28 +91,37 @@ kernel/
   kernel/             portable kernel: scheduler, threads, processes, fds,
                       timekeeping, klog, panic, printf, string library,
                       self tests, kernel shell
-  include/lume/       kernel headers (hw/bcm2835.h holds the register map)
-tools/                build tools: ELF->flat binary, image builder, ISA checker,
-                      firmware fetcher, CI annotation helper, zig cc wrapper
+  include/lume/       kernel headers (hw/bcm2835.h holds the register map,
+                      divmod.h the portable division cores behind the EABI
+                      helpers)
+tools/                build tools: ELF->flat binary, image builder and verifier,
+                      ISA checker, EABI checker, firmware fetcher, CI annotation
+                      helper, zig cc wrapper
 tests/
   host/               unit tests that run on the development machine
-  qemu/               emulator boot test (QEMU raspi0 model)
+  qemu/               emulator boot test (QEMU raspi0 model) and the boot
+                      diagnosis tool
 config.txt            Raspberry Pi boot configuration copied into the image
-docs/                 architecture, building, testing, hardware, roadmap
+docs/                 architecture, building, testing, hardware, boot chain,
+                      userspace/ABI plan, roadmap, research notes
 ```
+
+The build artefacts are `build/lumeos.elf` (with symbols),
+`build/kernel.img` (the flat image the firmware loads) and
+`build/lumeos-sd.img` (the flashable card image). Nothing generated is committed.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
-| [docs/architecture.md](docs/architecture.md) | how the kernel is put together: boot, memory map, MMU, exceptions, scheduler, coding rules |
+| [docs/architecture.md](docs/architecture.md) | how the kernel is put together: boot, memory map, MMU, exceptions, scheduler, the two ARM calling conventions, coding rules |
 | [docs/building.md](docs/building.md) | toolchains (including a no-root fallback), build targets, troubleshooting |
-| [docs/testing.md](docs/testing.md) | what is tested, how, and what each test does *not* prove |
+| [docs/testing.md](docs/testing.md) | the four levels of testing, what each one does *not* prove, where the boot currently stops, and how to read CI results |
 | [docs/hardware.md](docs/hardware.md) | Raspberry Pi Zero W specifics, flashing, serial console, first boot |
 | [docs/boot-pi.md](docs/boot-pi.md) | the Raspberry Pi boot chain and the assumptions LumeOS makes about it |
-| [docs/userspace.md](docs/userspace.md) | the ARM Linux ABI plan: syscalls, ELF loading, signals, libc |
-| [docs/roadmap.md](docs/roadmap.md) | milestones from here to running real ARM Linux binaries |
-| [docs/research-notes.md](docs/research-notes.md) | the public references the implementation is based on |
+| [docs/userspace.md](docs/userspace.md) | the ARM Linux ABI plan: syscall convention and numbers, structure layouts, ELF loading, TLS, how the compatibility layer is split from the native one |
+| [docs/roadmap.md](docs/roadmap.md) | milestones from here to running real ARM Linux binaries, including the known bugs at the current head |
+| [docs/research-notes.md](docs/research-notes.md) | every public reference the implementation is based on, what was taken from each, and what is still uncertain |
 | [THIRD_PARTY.md](THIRD_PARTY.md) | licences of everything LumeOS depends on or downloads |
 
 ## Requirements
