@@ -72,6 +72,16 @@ def symbolize(addresses: list[int], elf: Path) -> dict[int, str]:
     return resolved
 
 
+def boot_markers() -> list[str]:
+    """The markers run_qemu_test.py greps for, imported so they cannot drift."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from run_qemu_test import BOOT_MARKERS  # type: ignore
+        return list(BOOT_MARKERS)
+    except Exception:
+        return []
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -126,6 +136,26 @@ def main(argv: list[str]) -> int:
         print(f"DIAG: serial output: {len(serial)} bytes"
               + (f", first 120: {serial[:120]!r}" if serial else " (nothing printed)"))
         summary["serial bytes"] = len(serial)
+
+        # Which of the boot markers the kernel actually reached, and what it was
+        # saying when it stopped: the single most useful pair of facts, and a
+        # lot cheaper to read than the whole log.
+        markers = boot_markers()
+        if markers:
+            reached = [m for m in markers if m in serial]
+            print(f"DIAG: boot markers: {len(reached)}/{len(markers)} reached")
+            for marker in markers:
+                if marker not in serial:
+                    print(f"DIAG:   not reached: {marker!r}")
+            summary["markers reached"] = f"{len(reached)}/{len(markers)}"
+            if reached:
+                summary["last marker"] = reached[-1]
+        if serial:
+            tail = serial.strip().splitlines()[-6:]
+            print("DIAG: serial tail (last 6 lines):")
+            for line in tail:
+                print(f"DIAG:   {line[:160]!r}")
+            summary["serial tail"] = tail[-1][:160] if tail else ""
 
         if not log_path.is_file():
             print("DIAG: QEMU wrote no debug log")
@@ -221,7 +251,8 @@ def main(argv: list[str]) -> int:
         # capped at a few kilobytes, so the most useful facts are repeated here
         # where truncation cannot reach them.
         print("DIAG: ---- summary ----")
-        for key in ("strategy", "note", "serial bytes", "blocks",
+        for key in ("strategy", "note", "serial bytes", "markers reached",
+                    "last marker", "serial tail", "blocks",
                     "qemu unimp/unassigned", "exceptions", "first exception",
                     "last exception", "last block"):
             if key in summary:
