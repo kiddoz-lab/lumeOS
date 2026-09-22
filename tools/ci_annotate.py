@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Publish the tail of a CI log file as a GitHub Actions error annotation.
+
+Why this exists: workflow logs are easy to read in the GitHub UI but are not
+available to every consumer of the API (and some environments cannot reach the
+log download host at all).  Annotations *are* reachable through the checks API,
+so a failing CI step calls this script to make its real error message visible
+wherever the run is inspected:
+
+    python3 tools/ci_annotate.py build-kernel.log --title "make kernel"
+
+The script never fails the build itself (a diagnostics tool must not turn one
+failure into two): it always exits 0.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+
+def escape(message: str) -> str:
+    """Escape a message for the ::error:: workflow command."""
+    return (message.replace("%", "%25")
+                   .replace("\r", "%0D")
+                   .replace("\n", "%0A"))
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("logfile", help="log file to read")
+    parser.add_argument("--lines", type=int, default=30,
+                        help="how many trailing lines to publish")
+    parser.add_argument("--title", default="", help="annotation title")
+    parser.add_argument("--max-chars", type=int, default=6000)
+    args = parser.parse_args(argv)
+
+    path = Path(args.logfile)
+    if not path.is_file():
+        print(f"::error title={args.title or 'ci_annotate'}::"
+              f"log file {args.logfile} does not exist")
+        return 0
+
+    text = path.read_text(errors="replace")
+    lines = text.splitlines()
+    tail = "\n".join(lines[-args.lines:]).strip()
+    if not tail:
+        tail = "(log file is empty)"
+    if len(tail) > args.max_chars:
+        tail = "...(truncated)...\n" + tail[-args.max_chars:]
+
+    title = escape(args.title) if args.title else ""
+    print(f"::error title={title}::{escape(tail)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

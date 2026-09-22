@@ -63,7 +63,12 @@ jobs:
       - name: Build the kernel (build/kernel.img)
         run: |
           set -o pipefail
-          make kernel 2>&1 | tee build-kernel.log
+          if ! make kernel 2>&1 | tee build-kernel.log; then
+            # Make the real error readable through the checks API as well as
+            # the log viewer.
+            python3 tools/ci_annotate.py build-kernel.log --title "make kernel"
+            exit 1
+          fi
 
       - name: Show the kernel image layout
         run: |
@@ -74,7 +79,12 @@ jobs:
           arm-none-eabi-size build/lumeos.elf || true
 
       - name: Host unit tests (printf, string library, build tools)
-        run: make test-host
+        run: |
+          set -o pipefail
+          if ! make test-host 2>&1 | tee host-tests.log; then
+            python3 tools/ci_annotate.py host-tests.log --title "make test-host"
+            exit 1
+          fi
 
       - name: Fetch the Raspberry Pi boot firmware
         id: firmware
@@ -86,7 +96,10 @@ jobs:
         if: steps.firmware.outcome == 'success'
         run: |
           set -o pipefail
-          make image 2>&1 | tee build-image.log
+          if ! make image 2>&1 | tee build-image.log; then
+            python3 tools/ci_annotate.py build-image.log --title "make image"
+            exit 1
+          fi
           ls -l build/lumeos-sd.img
           sha256sum build/lumeos-sd.img build/kernel.img
 
@@ -116,9 +129,14 @@ jobs:
       - name: QEMU boot test (emulated, informational)
         continue-on-error: true
         run: |
-          python3 tests/qemu/run_qemu_test.py \
+          set -o pipefail
+          if ! python3 tests/qemu/run_qemu_test.py \
               --image build/kernel.img --elf build/lumeos.elf \
-              --timeout 60 --required --machine raspi0
+              --timeout 60 --required --machine raspi0 2>&1 | tee qemu-test.log; then
+            python3 tools/ci_annotate.py qemu-test.log --title "qemu boot test" \
+                --lines 40
+            exit 1
+          fi
 
       - name: Summarise the build
         if: always()
