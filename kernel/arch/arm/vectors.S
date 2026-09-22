@@ -222,19 +222,42 @@ str_fiq:
 #define TRAP_STACK_SIZE 4096
 	.bss
 	.align	8
+
+/* Stacks grow downwards, so each region is defined bottom-first and the
+ * exported *_top symbol sits immediately after the reserved space.  (Getting
+ * this backwards made every stack overlap the next one; caught by the QEMU
+ * boot test's address-to-symbol diagnosis.) */
+	.global	__stack_irq_bottom
+__stack_irq_bottom:
+	.space	TRAP_STACK_SIZE
 	.global	__stack_irq_top
 __stack_irq_top:
+
+	.align	8
+	.global	__stack_fiq_bottom
+__stack_fiq_bottom:
 	.space	TRAP_STACK_SIZE
 	.global	__stack_fiq_top
 __stack_fiq_top:
+
+	.align	8
+	.global	__stack_abt_bottom
+__stack_abt_bottom:
 	.space	TRAP_STACK_SIZE
 	.global	__stack_abt_top
 __stack_abt_top:
+
+	.align	8
+	.global	__stack_und_bottom
+__stack_und_bottom:
 	.space	TRAP_STACK_SIZE
 	.global	__stack_und_top
 __stack_und_top:
-	.space	TRAP_STACK_SIZE
+
+	.align	8
+	.global	__stack_svc_bottom
+__stack_svc_bottom:
+	.space	TRAP_STACK_SIZE * 2
 	.global	__stack_svc_top
 __stack_svc_top:
-	.space	TRAP_STACK_SIZE * 2
 	.align	8

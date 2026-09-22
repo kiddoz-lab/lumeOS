@@ -20,7 +20,7 @@
 #include <lume/uart.h>
 #include <lume/types.h>
 
-#define UART_REG(off) (*(volatile u32 *)((u32)PHYS_TO_VIRT(BCM2835_UART0_BASE) + (off)))
+#define UART_REG(off) (*(volatile u32 *)((u32)PERIPHERAL_TO_VIRT(BCM2835_UART0_BASE) + (off)))
 
 /* Set by the driver at init time. */
 static u32 uart_clock;

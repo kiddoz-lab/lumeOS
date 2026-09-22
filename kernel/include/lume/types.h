@@ -59,6 +59,8 @@ typedef u32 ssize_t_lume;
  * makes reasoning about the ABI layer easier), user space lives below
  * 0xC0000000. */
 #define KERNEL_VBASE     0xC0000000u
+/* RAM alias only.  Peripheral registers need PERIPHERAL_TO_VIRT() from
+ * <lume/hw/bcm2835.h>; they live in a separate virtual window. */
 #define PHYS_TO_VIRT(p)  ((void *)((u32)(p) + KERNEL_VBASE))
 #define VIRT_TO_PHYS(v)  ((u32)(v) - KERNEL_VBASE)
 #define KERNEL_ADDR(p)   PHYS_TO_VIRT(p)

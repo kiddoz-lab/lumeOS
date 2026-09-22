@@ -13,7 +13,7 @@
 #include <lume/klog.h>
 #include <lume/types.h>
 
-#define GPIO_REG(off) (*(volatile u32 *)((u32)PHYS_TO_VIRT(BCM2835_GPIO_BASE) + (off)))
+#define GPIO_REG(off) (*(volatile u32 *)((u32)PERIPHERAL_TO_VIRT(BCM2835_GPIO_BASE) + (off)))
 
 void gpio_init(void)
 {
@@ -27,7 +27,7 @@ int gpio_set_function(u32 pin, enum gpio_function func)
     if (pin >= LUME_GPIO_MAX)
         return -1;
 
-    volatile u32 *fsel = (volatile u32 *)((u32)PHYS_TO_VIRT(BCM2835_GPIO_BASE) + GPIO_FSEL0);
+    volatile u32 *fsel = (volatile u32 *)((u32)PERIPHERAL_TO_VIRT(BCM2835_GPIO_BASE) + GPIO_FSEL0);
     u32 reg = pin / 10;
     u32 shift = (pin % 10) * 3;
     u32 flags = arm_irq_save();

@@ -36,7 +36,7 @@
 #include <lume/time.h>
 #include <lume/types.h>
 
-#define TIMER_REG(off) (*(volatile u32 *)((u32)PHYS_TO_VIRT(BCM2835_SYSTIMER_BASE) + (off)))
+#define TIMER_REG(off) (*(volatile u32 *)((u32)PERIPHERAL_TO_VIRT(BCM2835_SYSTIMER_BASE) + (off)))
 
 #define TIMER_CS  0x00
 #define TIMER_CLO 0x04

@@ -143,14 +143,32 @@ def main(argv: list[str]) -> int:
                         break
         print(f"DIAG: translated blocks executed: {len(executed)}")
         if executed:
-            tail = executed[-args.blocks:]
-            symbols = symbolize(tail, args.elf)
-            print(f"DIAG: last {len(tail)} executed blocks (address: symbol):")
-            for addr in tail:
-                print(f"DIAG:   0x{addr:08x}  {symbols.get(addr, '?')}")
-            if len(set(executed[-50:])) <= 2:
-                print(f"DIAG: the guest is spinning in {len(set(executed[-50:]))} "
-                      "block(s): that address is the hang")
+            symbols = symbolize(executed, args.elf)
+
+            def short(addr: int) -> str:
+                text = symbols.get(addr, "?")
+                # "path/to/file.c:57 (function)" -> "function file.c:57"
+                function = ""
+                location = text
+                if " (" in text and text.endswith(")"):
+                    location, _, function = text.partition(" (")
+                    function = function.rstrip(")")
+                location = location.rsplit("/", 1)[-1]
+                return f"{function} {location}".strip()
+
+            path: list[str] = []
+            for addr in executed:
+                name = short(addr)
+                if not path or path[-1] != name:
+                    path.append(name)
+            print(f"DIAG: first 6 blocks: "
+                  + " | ".join(short(a) for a in executed[:6]))
+            print(f"DIAG: last 12 blocks (address: symbol):")
+            for addr in executed[-args.blocks:]:
+                print(f"DIAG:   0x{addr:08x}  {short(addr)}")
+            print(f"DIAG: execution path ({len(path)} distinct blocks, last 30):")
+            for name in path[-30:]:
+                print(f"DIAG:   {name}")
         else:
             print("DIAG: no guest code was translated at all - the CPU never "
                   "started executing at the expected entry point")
@@ -158,12 +176,26 @@ def main(argv: list[str]) -> int:
         # ---- exceptions ----
         ints = [line for line in lines if line.startswith("Taking exception")
                 or "exception" in line.lower() and line.startswith("IN:")]
-        take = [line for line in lines if "Taking exception" in line]
+        take = [i for i, line in enumerate(lines) if "Taking exception" in line]
         print(f"DIAG: exceptions taken: {len(take)}")
-        for line in take[:5]:
-            print(f"DIAG:   {line.strip()[:160]}")
-        if len(take) > 5:
-            print(f"DIAG:   ... and {len(take) - 5} more")
+        for index in take[:3]:
+            for line in lines[index:index + 8]:
+                stripped = line.strip()
+                if stripped:
+                    print(f"DIAG:   {stripped[:160]}")
+            # A register dump follows the exception; R15 is the faulting PC.
+            for line in lines[index:index + 20]:
+                match = re.search(r"R15=([0-9a-fA-F]{8,16})", line)
+                if match:
+                    fault_pc = int(match.group(1), 16)
+                    where = symbolize([fault_pc], args.elf).get(fault_pc, "?")
+                    print(f"DIAG:   faulting PC 0x{fault_pc:08x} -> {where}")
+                for reg in ("FAR=", "FSR=", "DFAR=", "DFSR="):
+                    match = re.search(reg + r"([0-9a-fA-F]{8})", line)
+                    if match:
+                        print(f"DIAG:   {reg}{match.group(1)}")
+        if len(take) > 3:
+            print(f"DIAG:   ... and {len(take) - 3} more")
 
         # ---- unimplemented / unassigned accesses ----
         bad = [line for line in lines

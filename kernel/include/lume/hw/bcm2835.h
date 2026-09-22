@@ -29,6 +29,23 @@
 /* ARM physical base of the peripheral window (16 MiB). */
 #define BCM2835_PERIPHERAL_BASE 0x20000000u
 
+/*
+ * The boot code maps the peripheral block at its own virtual address:
+ * physical 0x20000000..0x3FFFFFFF -> virtual 0xF0000000..0xFFFFFFFF
+ * (see kernel/arch/arm/boot.S and docs/architecture.md).
+ *
+ * Always use PERIPHERAL_TO_VIRT() for register addresses.  PHYS_TO_VIRT() adds
+ * the kernel RAM bias instead, which for a peripheral address gives 0xE0xxxxxx
+ * - the uncached RAM alias region, not the peripherals.  That mistake is
+ * invisible to the compiler and made the first QEMU boot die with a data abort
+ * before the serial console existed, so it is spelled out here.
+ */
+#define BCM2835_PERIPHERAL_VBASE 0xF0000000u
+#define PERIPHERAL_TO_VIRT(p) \
+    ((void *)((u32)(p) - BCM2835_PERIPHERAL_BASE + BCM2835_PERIPHERAL_VBASE))
+#define PERIPHERAL_TO_PHYS(v) \
+    ((u32)(v) - BCM2835_PERIPHERAL_VBASE + BCM2835_PERIPHERAL_BASE)
+
 /* The boot firmware reserves the bottom of RAM for ATAGS/device tree. */
 #define BCM2835_FIRMWARE_AREA_END 0x00008000u
 

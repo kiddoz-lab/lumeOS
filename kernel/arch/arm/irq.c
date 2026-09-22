@@ -21,7 +21,7 @@
 #include <lume/trapframe.h>
 #include <lume/types.h>
 
-#define IRQ_REG(off) (*(volatile u32 *)((u32)PHYS_TO_VIRT(BCM2835_IRQ_BASE) + (off)))
+#define IRQ_REG(off) (*(volatile u32 *)((u32)PERIPHERAL_TO_VIRT(BCM2835_IRQ_BASE) + (off)))
 
 static struct irq_chip_data {
     const char *name;

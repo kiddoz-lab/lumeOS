@@ -18,7 +18,7 @@
 #include <lume/string.h>
 #include <lume/types.h>
 
-#define MBOX_REG(off) (*(volatile u32 *)((u32)PHYS_TO_VIRT(BCM2835_MBOX_BASE) + (off)))
+#define MBOX_REG(off) (*(volatile u32 *)((u32)PERIPHERAL_TO_VIRT(BCM2835_MBOX_BASE) + (off)))
 
 /* Property message buffer: 16-byte aligned as required by the protocol. */
 #define PROP_BUFFER_WORDS 64

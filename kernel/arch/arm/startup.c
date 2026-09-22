@@ -80,7 +80,7 @@ void arch_console_enable_input(void)
 
 void arch_reboot(void)
 {
-    volatile u32 *pm = (volatile u32 *)PHYS_TO_VIRT(BCM2835_PM_BASE);
+    volatile u32 *pm = (volatile u32 *)PERIPHERAL_TO_VIRT(BCM2835_PM_BASE);
     u32 rstc;
 
     arm_irq_disable();
