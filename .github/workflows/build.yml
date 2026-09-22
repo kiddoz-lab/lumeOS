@@ -147,7 +147,7 @@ jobs:
       # leave no panic or fault output behind in QEMU's bcm2835 model.  It
       # proves nothing about real hardware - see docs/testing.md - but a
       # regression that breaks the boot now fails the build instead of being
-      # reported as "informational".
+      # reported as a note.
       - name: QEMU boot test (emulated)
         run: |
           set -o pipefail
@@ -171,6 +171,12 @@ jobs:
                 --title "qemu boot test" --tail 30 --max-chars 3500
             exit 1
           fi
+          # Record the result of a passing boot too: "the emulator booted the
+          # kernel" is the kind of claim that should be checkable afterwards
+          # without reading a log whose download host may not be reachable.
+          python3 tools/ci_annotate.py qemu-test.log \
+              --title "QEMU boot test result" --notice \
+              --grep "PASS via|checks passed|NOTE:" --max-chars 1200
 
       - name: Summarise the build
         if: always()

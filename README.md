@@ -32,11 +32,11 @@ exists and is checked to the extent an emulator and a host machine allow.
 | Bootable SD image (MBR + FAT16 + firmware) | built by CI as an artifact |
 | Host unit tests (`printf`, string library, division cores, build tools, both gates) | 23 tests pass locally and in CI |
 | Static gates (ARMv6 ISA, EABI calling convention) | pass on every build; enforced in CI |
-| In-kernel self tests (43 checks) | written and run on every boot; **results not yet observed** |
-| Boot stub, MMU, caches, high vectors | 🟡 executes under QEMU; **unverified on hardware** |
-| Exceptions, IRQs, system timer, scheduler | 🟡 reached under QEMU; the boot then fails in the interrupt path (**unverified on hardware**) |
-| Serial console (PL011, 115200 8N1) | 🟡 prints under QEMU; **unverified on hardware** |
-| Kernel shell | 🟡 written, never interacted with |
+| In-kernel self tests (44 checks) | `44/44` under QEMU; printed on every boot and asserted by CI (`N == M`, at least 40) |
+| Boot stub, MMU, caches, high vectors | 🟡 executes under QEMU and reaches all four boot markers; **unverified on hardware** |
+| Exceptions, IRQs, system timer, scheduler | 🟡 ticks, dispatches IRQs and idles in QEMU without faulting (**unverified on hardware**) |
+| Serial console (PL011, 115200 8N1) | 🟡 prints, and the shell prompt reaches the terminal, under QEMU; **unverified on hardware** |
+| Kernel shell | 🟡 prompt appears under QEMU; no command has been typed into it yet |
 | Framebuffer / input / storage / networking | **not implemented** |
 | Userspace: ELF loader, syscalls, VFS, processes | **not implemented** (`main.c` prints that the hand-off is missing instead of pretending) |
 
@@ -116,7 +116,7 @@ The build artefacts are `build/lumeos.elf` (with symbols),
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | how the kernel is put together: boot, memory map, MMU, exceptions, scheduler, the two ARM calling conventions, coding rules |
 | [docs/building.md](docs/building.md) | toolchains (including a no-root fallback), build targets, troubleshooting |
-| [docs/testing.md](docs/testing.md) | the four levels of testing, what each one does *not* prove, where the boot currently stops, and how to read CI results |
+| [docs/testing.md](docs/testing.md) | the four levels of testing, what each one does *not* prove, what the emulator run currently establishes, and how to read CI results |
 | [docs/hardware.md](docs/hardware.md) | Raspberry Pi Zero W specifics, flashing, serial console, first boot |
 | [docs/boot-pi.md](docs/boot-pi.md) | the Raspberry Pi boot chain and the assumptions LumeOS makes about it |
 | [docs/userspace.md](docs/userspace.md) | the ARM Linux ABI plan: syscall convention and numbers, structure layouts, ELF loading, TLS, how the compatibility layer is split from the native one |

@@ -168,7 +168,7 @@ LumeOS 0.1.0 (armv6kz) -- an operating system for the Raspberry Pi Zero W
 kernel: entered at virtual 0xc00081xx, loaded at physical 0x00008000, image ends at 0x0002b000
 memory: 448 MiB RAM at 0x00000000, ... KiB free after reservations
 selftest: running kernel self tests
-selftest: 43/43 checks passed
+selftest: 44/44 checks passed
 LumeOS: boot complete, ... KiB free, ... timer ticks
 main: entering the idle loop
 ```
@@ -176,8 +176,17 @@ main: entering the idle loop
 (The exact wording comes from `kernel/kernel/main.c` and
 `kernel/kernel/selftest.c`; `LumeOS: boot complete` and
 `main: entering the idle loop` are the markers the emulator test greps for, so
-they are stable by construction. The check count is 43 today and will grow with
-the kernel.)
+they are stable by construction. The check count is 44 today and will grow with
+the kernel - and it is part of what the emulator test asserts, so the number in
+a real boot log can be compared directly against what CI saw.
+
+The predictions above are now backed by emulator evidence rather than only by
+reading the code: the boot reaches all four markers, `44/44` self tests pass and
+the shell prompt appears under QEMU (see
+[testing.md](testing.md#what-the-emulator-run-currently-proves)). What is still
+unproven on this page is anything that depends on the firmware, the card, the
+wiring, the clocks or the board. If you are the first person to run this on
+hardware, that is the open question, not the kernel's internal logic.
 
 Then a prompt from the kernel shell (`help` lists `mem`, `ps`, `time`, `irq`,
 `echo`, `reboot`, `halt`, `version`):
@@ -196,9 +205,9 @@ If the boot hangs, the last line printed is the evidence: silence after the
 banner means the failure is in whichever subsystem prints next (memory
 detection, the timer, the interrupt controller), while nothing at all means the
 failure is in `boot.S`, in the MMU setup or in the UART clock query - all of
-which run before the first line. Where the kernel currently stops under the
-emulator, and how that diagnosis is produced, is in
-[testing.md](testing.md#where-the-boot-currently-stops).
+which run before the first line. What the kernel has actually been observed to
+do under the emulator - and how that observation is produced - is in
+[testing.md](testing.md#what-the-emulator-run-currently-proves).
 
 ---
 

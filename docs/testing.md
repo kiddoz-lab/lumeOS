@@ -127,32 +127,71 @@ image in QEMU, but it is not how the Pi firmware boots LumeOS. Without
 `--required` (or `$CI`), the test reports SKIP when QEMU is missing, so
 `make test-qemu` on a machine without QEMU does not fail the build.
 
-### Where the boot currently stops
+### What the emulator run currently proves
 
-As of the current branch, the `bios` strategy gets a long way and then fails:
+At the current head the `bios` and `loader` strategies boot; the `kernel`
+strategy still fails, as it should, because it uses a different entry contract.
+A passing run establishes, from the guest's own serial output:
 
-* the kernel reaches C code, initializes the PL011 and *prints* - so the boot
-  stub, the MMU, the peripheral mapping and the baud-rate setup all work (the
-  diagnosis reports how many bytes came out and the first 120 of them);
-* it initializes the system timer, the interrupt controller and the scheduler,
-  and execution reaches the scheduler's context switch, the wait queues and the
-  serial input driver;
-* then the interrupt path takes over: the emulator counts over a million IRQs in
-  a ten-second run (mostly at `uart_rx_ready+0x14`, i.e. the PL011 RX
-  interrupt), and the last exception QEMU reports is a prefetch abort with
-  `IFSR 0x5` (section translation fault) at `IFAR 0xffff000c` - inside the
+* all four boot markers print, in order, ending with
+  `main: entering the idle loop`;
+* the kernel prints `selftest: 44/44 checks passed` - the physical memory
+  manager, the kernel heap, MMU mapping and translation, the system timer, the
+  string library and the EABI division helpers all behave as their tests
+  require. The emulator asserts `N == M` *and* that at least 40 checks ran, so
+  the summary line cannot quietly become vacuous;
+* the PL011 emits the shell prompt (`lume>`) at the end of a serial log of a few
+  kilobytes, so the console, the interrupt path and the receive path are all
+  live;
+* the exception history QEMU records during the run is quiet: the last exception
+  is an ordinary IRQ, there is no prefetch abort, and no `IFAR`/`IFSR` line
+  appears at all. Earlier runs ended in a prefetch abort with `IFSR 0x5`
+  (section translation fault) at `IFAR 0xffff000c` - a fault inside the
   exception vector page itself.
 
-The lesson from that trace is recorded in
-[architecture.md](architecture.md): the boot stub maps the vector page at
-`0xFFFF0000`, and the kernel runs with the high-vector configuration, so a
-fault *in the vector entry* means the dispatch of the exception failed, not
-that the exception occurred.
+Two defects were fixed to get here. Both had symptoms that pointed somewhere
+other than the cause, which is the only reason they are written down at this
+length:
 
-The step is marked `continue-on-error: true` in CI and this is deliberate: the
-job records a full diagnosis instead of turning the build red while a real bug
-is being worked on. The current suspicion list (from the emulator's own trace,
-not from guesswork) is in [roadmap.md](roadmap.md#known-bugs-at-the-current-head).
+1. **The interrupt storm was a level-held source, not a routing mistake.** The
+   emulator counted 1,646,273 exceptions in a ten-second run, nearly all of them
+   returning to `uart_rx_ready+0x14` - the PL011 receive interrupt. That reading
+   suggests bad interrupt-controller routing, and the hypothesis was attractive
+   because the timer and UART line numbering really does differ between the
+   BCM2835 manual and QEMU's model. The actual cause was in the driver:
+   `uart_irq_handler()` acknowledged only the RX and receive-timeout bits, so
+   when the masked interrupt status contained *only* an error condition
+   (overrun, break, framing, parity - all of which the PL011 raises and a
+   floating or badly wired RX line is enough to cause) it returned without
+   acknowledging anything and the line stayed asserted. The handler now clears
+   every bit the device reports, with a one-shot warning because such a bit
+   usually means the wiring is wrong, and drivers whose line is aggregated into
+   the controller's *basic pending* register mark themselves self-checking so
+   that `do_irq()` services them even when the two shared pending registers read
+   as empty. The same run now reports **74** exceptions instead of 1.6 million.
+2. **`vmm_translate()`'s "not mapped" sentinel collided with physical address
+   0.** The kernel maps virtual `0xC0000000` to *physical* 0 - the bottom of
+   RAM, where the image is not, but where RAM begins - so a returned 0 could
+   mean either "unmapped" or "mapped to physical 0", and the self test asking
+   whether the kernel half is visible in a fresh address space could never pass.
+   The function now returns `0`/`-1` and writes the physical address through a
+   pointer. The test asserts a translation whose physical address is
+   distinguishable (`0xC0008000 -> 0x00008000`, the page the image is actually
+   loaded into), that a never-mapped address reports failure, and that the
+   exception vector page (`0xFFFF0000 -> 0x000F0000`) is present.
+
+None of that is hardware evidence. QEMU implements a BCM2835 *model*: the boot
+ROM, `start.elf`, the card, the clock tree, the GPIO configuration and the
+board's electrical behaviour are all absent or idealised. What the emulator can
+show is that the kernel's own logic is self-consistent; whether the firmware
+loads it, whether the UART is wired where the kernel thinks and whether the
+timings hold is §5 of [boot-pi.md](boot-pi.md). Until that has happened on a
+board, every one of the bullets above carries the label **emulated only**.
+
+The QEMU step is blocking in CI, so a regression that loses a marker, a self
+test or the prompt fails the build rather than being reported as a note. The
+step deliberately has no `continue-on-error`; when a real bug does appear, the
+diagnosis step below supplies the trace.
 
 ### `tests/qemu/diagnose_boot.py`
 
@@ -226,7 +265,9 @@ accidentally lie in a README:
   SHA-256 is also written into a `::notice::` annotation;
 * a `lumeos-kernel` artifact with `build/lumeos.elf` and `build/kernel.img`
   (the ELF carries symbols for `addr2line`/`gdb`);
-* the QEMU boot diagnosis annotation when the (informational) QEMU step fails.
+* the QEMU boot diagnosis annotation when the QEMU step fails, plus a
+  `notice` annotation with the passing run's markers and self test counts (so
+  "it booted" is checkable after the fact, not only on failure).
 
 Useful queries with the GitHub CLI:
 

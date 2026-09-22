@@ -6,12 +6,13 @@ Statuses are kept strict - *works* means a test that actually ran passed, not
 
 | | |
 | --- | --- |
-| Today | bring-up: the kernel builds, is ISA-gated, and runs far enough under QEMU to reach the scheduler (details below) |
-| Next | fix the interrupt path so the kernel reaches its boot markers in the emulator, then validate on a real Pi Zero W |
-| Then | userspace: ELF loader, syscalls, `init`, a shell - and the first real ARM Linux binary |
+| Today | milestone 1 in the emulator: the kernel boots to its markers, passes `44/44` self tests and reaches the shell prompt under QEMU (CI-enforced) |
+| Next | validate that same image on a real Pi Zero W, then start userspace |
+| Then | ELF loader, syscalls, `init`, a shell - and the first real ARM Linux binary |
 
-Legend: ✅ works and is covered by a test that ran · 🟡 written, not yet observed
-working · ⛔ not started.
+Legend: ✅ works and is covered by a test that ran - and unless a row says
+otherwise that test is the *emulator*, not a Raspberry Pi · 🟡 written, not yet
+observed working, or observed but not measured · ⛔ not started.
 
 ---
 
@@ -26,7 +27,7 @@ working · ⛔ not started.
 | Host unit tests | ✅ `make test-host` (printf, string, division cores, image tooling, both gates) |
 | Documentation | ✅ this document set |
 
-## Milestone 1 - boot to the boot markers under QEMU 🟡
+## Milestone 1 - boot to the boot markers under QEMU 🟡 (emulator part done)
 
 The kernel must reach all four markers in the emulator before anything else is
 worth building on top: an unreliable foundation makes every later bug
@@ -34,54 +35,71 @@ ambiguous.
 
 | Item | State |
 | --- | --- |
-| Boot stub: MMU, caches, high vectors, per-mode stacks | 🟡 executes; no faulting reported in the stub itself |
-| PL011 console at 115200 8N1 | 🟡 prints in QEMU; **unverified on hardware** |
-| Physical memory manager, kernel heap | 🟡 self tests exist and run on every boot; results not yet observed |
-| MMU section/page mapping, device memory attributes | 🟡 idem |
-| System timer (1 MHz counter, compare channel 3, 100 Hz tick) | 🟡 idem |
-| Interrupt controller, IRQ dispatch | 🟡 idem, and this is where the boot currently breaks |
-| Preemptive scheduler, threads | 🟡 reaches the scheduler's context switch in the trace |
-| Kernel self tests (43 checks) | 🟡 run on every boot and print a summary line the emulator greps for |
-| Kernel shell (`help`, `mem`, `ps`, `time`, `irq`, `echo`, `reboot`, `halt`, `version`) | 🟡 written, never interacted with |
+| Boot stub: MMU, caches, high vectors, per-mode stacks | ✅ reaches C code and the shell prompt in QEMU; **unverified on hardware** |
+| PL011 console at 115200 8N1 | ✅ prints in QEMU; **unverified on hardware** |
+| Physical memory manager, kernel heap | ✅ covered by self tests that pass on every boot (emulated) |
+| MMU section/page mapping, device memory attributes | ✅ idem, including the translation API's unmapped case |
+| System timer (1 MHz counter, compare channel 3, 100 Hz tick) | ✅ idem; the tick counter advances and the IRQ count is sane (74 exceptions in a ten-second run, versus 1.6 million before the fix) |
+| Interrupt controller, IRQ dispatch | ✅ self-checking handlers and unclaimed-interrupt reporting; the storm is gone and the last exception of a run is an ordinary IRQ |
+| Preemptive scheduler, threads | 🟡 context switch, wait queues and the idle loop all execute; starvation and fairness are unmeasured |
+| Kernel self tests (44 checks) | ✅ `44/44` asserted by the emulator test on every CI run |
+| Kernel shell (`help`, `mem`, `ps`, `time`, `irq`, `echo`, `reboot`, `halt`, `version`) | 🟡 the prompt appears in QEMU; no command has been typed into it yet |
+
+### Fixed since this milestone started
+
+The two bugs that used to sit at the top of this list are closed, and the
+evidence is in [testing.md](testing.md#what-the-emulator-run-currently-proves):
+
+1. **The interrupt storm was a level-held source, not bad routing.** The PL011
+   handler acknowledged only the RX and receive-timeout bits, so an interrupt
+   caused purely by an error condition (overrun, break, framing, parity) was
+   returned from without acknowledging anything, leaving the line asserted and
+   re-entering the handler forever - 1,646,273 exceptions in ten seconds. The
+   handler now clears every bit the device reports, and lines aggregated into
+   the controller's *basic pending* register register themselves as
+   self-checking. A run now counts 74 exceptions, and the prefetch abort at
+   `IFAR 0xffff000c` that the storm ended in is gone with it.
+2. **`vmm_translate()`'s 0-sentinel collided with physical address 0**, so
+   "unmapped" and "the kernel alias at 0xC0000000" were indistinguishable and
+   one self test could never pass. It now returns `0`/`-1` and reports the
+   physical address through an out-parameter.
 
 ### Known bugs at the current head
 
-These are open, reproducible from the emulator trace, and not hidden behind
-"informational" language:
+These are open and real. None of them is visible in the emulator run today,
+which is itself a limitation: they are all paths the QEMU boot does not reach.
 
-1. **Interrupt storm + a fault inside the exception vector.** The emulator
-   counts well over a million IRQs in a ten-second run; the overwhelming
-   majority return to `uart_rx_ready+0x14`, i.e. the PL011 receive interrupt is
-   being taken continuously. The last exception is a prefetch abort with
-   `IFSR 0x5` (section translation fault) at `IFAR 0xffff000c`, inside the
-   high-vector page. Two things are therefore wrong or at least suspect:
-   the RX interrupt is firing without data to read, and the vector page's
-   `Prefetch Abort` entry is not executable through the mapping the kernel
-   installed. Neither can be confirmed from the trace alone - the next step is
-   to check the vector page's page-table entry and the `PL011_MIS`/`ICR`
-   handling against the datasheet.
-2. **The PL011 interrupt routing is a documented-vs-emulator discrepancy.**
-   QEMU wires the system timer and the UART to the interrupt controller's GPU
-   IRQ lines; the BCM2835 manual describes the shared IRQ numbers the kernel
-   driver uses. The kernel's timer driver already falls back to polling the
-   counter (and reports how many ticks came from the fallback), but the UART
-   path has no such fallback, which may be exactly why one IRQ source dominates.
-3. **The `__restore_regs` path and the r8/r9 save order** in
+1. **The `__restore_regs` path and the r8/r9 save order** in
    `kernel/arch/arm/vectors.S` are wrong for a context switch that returns to a
-   user bank. Harmless while everything runs in SVC mode; must be fixed before
-   the first userspace entry.
-4. **The trap frame is not yet validated in bulk.** The self tests cover the
-   memory manager, the timer, the string library and the division helpers, but
-   not "an IRQ arrives, the handler runs, the frame is restored faithfully".
+   user bank. Harmless while everything runs in SVC mode - which is why nothing
+   fails today - and must be fixed before the first userspace entry.
+2. **The trap frame is not yet validated in bulk.** The self tests cover the
+   memory manager, MMU, timer, string library and division helpers, but not "an
+   IRQ arrives, the handler runs, the frame is restored faithfully". That is the
+   next self test worth writing, because every userspace bug will otherwise look
+   like an unexplained register corruption.
+3. **The scheduler runs, but nothing measures it.** Preemption, wait queues and
+   the idle loop execute; there is no test that a thread actually gets the CPU
+   after another one spins, nor any accounting of idle time.
+4. **The emulator's interrupt model differs from the manual** in how the timer
+   and the UART reach the interrupt controller (QEMU wires them to GPU IRQ
+   lines; the manual describes the shared IRQ numbers the driver uses). The
+   kernel services both paths and counts unclaimed interrupts, so a mismatch
+   will show up as a counter rather than as silence - but it will only be
+   settled on hardware, which is one more reason to keep the boot honest.
 
 ### Definition of done for milestone 1
 
-* `make test-qemu` passes with `--required` (all four markers, plus
-  `selftest: N/N checks passed`);
-* the CI step loses `continue-on-error` and becomes a real gate;
-* the same image is booted on a real Pi Zero W and the boot markers are observed
-  on the serial console, with the board, card, image SHA-256 and terminal
-  settings recorded in [testing.md](testing.md).
+* ✅ `make test-qemu` passes with `--required` (all four markers, plus
+  `selftest: N/N checks passed`) - done at commit `a7e8698`, CI run
+  `35755471382`;
+* ✅ the CI step lost `continue-on-error` in the same commit and now fails the
+  build on a boot regression;
+* ⛔ **the same image booted on a real Pi Zero W**, with the boot markers
+  observed on the serial console and the board, card, image SHA-256 and terminal
+  settings recorded in [testing.md](testing.md). This is the part of milestone 1
+  that is still open, and it cannot be closed by anything in this repository -
+  only by someone with the board.
 
 ## Milestone 2 - a real hardware boot ⛔
 
@@ -187,12 +205,19 @@ Three rules, enforced by convention and by CI:
 
 In the order the next commits should happen:
 
-1. Fix the exception/interrupt path so the QEMU boot test reaches its markers
-   (milestone 1). The trace says: RX interrupt storm, then a fault at
-   `0xffff000c`; check the vector page mapping and the PL011 `MIS`/`ICR` logic,
-   and check the timer's IRQ routing against QEMU's model.
-2. Make the QEMU step blocking (`continue-on-error` removed) once it passes.
-3. Turn the `userspace` target into a real target with a first static test
-   program, and make the `make help` text true again.
-4. Then milestone 3 in order: address spaces, ELF loader, syscall table,
-   `write`/`exit`/`brk`/`mmap2`.
+1. **Make the trap frame testable.** Write the self test that raises an
+   exception, checks that the handler sees a correct frame and that the
+   registers come back unchanged - then fix what it finds in `vectors.S`
+   (`__restore_regs`, the r8/r9 save order). This is the last thing standing
+   between the current kernel and a safe first userspace entry, and it is
+   testable in the emulator, so it costs nothing to do properly.
+2. **Make `make test-qemu` runnable locally and keep the diagnosis alive.** The
+   diagnosis step only fires on failure today; if it is cheap enough, run it
+   behind `--diagnose` in CI on every Nth run so the "quiet run" claim keeps
+   being measured instead of assumed.
+3. **Then userspace** (milestone 3): address spaces, ELF loader, syscall table,
+   `write`/`exit`/`brk`/`mmap2`, and the `userspace` target that turns a static
+   test program into something the kernel actually jumps into.
+4. **Then a hardware boot** (milestone 2) - which may have to come *before* the
+   userspace work if a board becomes available, because a bug found on hardware
+   changes what the userspace foundation has to look like.

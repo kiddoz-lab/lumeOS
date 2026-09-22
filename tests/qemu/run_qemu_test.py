@@ -60,7 +60,11 @@ BOOT_MARKERS = [
 
 # "selftest: 24/24 checks passed"
 SELFTEST_RE = re.compile(r"selftest: (\d+)/(\d+) checks passed")
-MIN_SELFTEST_CHECKS = 15
+# The kernel prints "selftest: N/M checks passed" on every boot; a run that
+# reports fewer checks than this has lost most of its self tests (a build
+# problem, a truncated boot), and the count is asserted so that the summary
+# cannot quietly become vacuous.  The kernel currently defines 44 checks.
+MIN_SELFTEST_CHECKS = 40
 
 FAILURE_PATTERNS = [
     "PANIC",

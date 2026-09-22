@@ -52,6 +52,11 @@ def main(argv: list[str]) -> int:
     # GitHub truncates an annotation message at 4096 characters and keeps the
     # beginning, so stay clearly below that and put the diagnosis first.
     parser.add_argument("--max-chars", type=int, default=3500)
+    parser.add_argument("--notice", action="store_true",
+                        help="publish an ::notice:: instead of ::error:: (for "
+                             "recording a success, e.g. a passing boot test)")
+    parser.add_argument("--grep", default="",
+                        help="select lines matching this regular expression")
     parser.add_argument("--tail", type=int, default=0,
                         help="publish the last N lines as-is, ignoring the error "
                              "patterns (use for test logs, where the interesting "
@@ -68,13 +73,26 @@ def main(argv: list[str]) -> int:
     text = path.read_text(errors="replace")
     lines = [line for line in text.splitlines() if line.strip()]
 
+    level = "notice" if args.notice else "error"
+
+    if args.grep:
+        pattern = re.compile(args.grep)
+        selected = [line for line in lines if pattern.search(line)]
+        header = (f"{len(selected)} line(s) matching {args.grep!r}\n"
+                  if selected else f"no line matched {args.grep!r}\n")
+        tail = header + "\n".join(selected)
+        if len(tail) > args.max_chars:
+            tail = tail[:args.max_chars] + "\n... (truncated)"
+        print(f"::{level} title={escape(args.title or 'match')}::{escape(tail)}")
+        return 0
+
     if args.tail > 0:
         selected = [line for line in lines if line.strip()][-args.tail:]
         header = f"last {len(selected)} line(s) of {args.logfile}\n"
         tail = header + "\n".join(selected)
         if len(tail) > args.max_chars:
             tail = tail[:args.max_chars] + "\n... (truncated)"
-        print(f"::error title={escape(args.title or 'log tail')}::{escape(tail)}")
+        print(f"::{level} title={escape(args.title or 'log tail')}::{escape(tail)}")
         return 0
 
     matches = [line for line in lines if ERROR_PATTERNS.search(line)]

@@ -212,8 +212,9 @@ These are real and tracked, not hidden:
 
 * **The trap frame save order in `vectors.S` is wrong for r8/r9.** The IRQ and
   abort entries save r8/r9 before the frame is complete; on a real core this can
-  corrupt a register on return. It is the first thing to fix when the kernel
-  first runs.
+  corrupt a register on return. Nothing fails today because the whole kernel
+  runs in SVC mode, which is exactly why it has to be fixed before the first
+  userspace entry, together with a self test that would catch it.
 * **`__restore_regs` restores the user bank unconditionally**, so returning to a
   kernel thread through that path would do the wrong thing.
 * No cache maintenance strategy beyond explicit clean/invalidate around mailbox

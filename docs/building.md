@@ -336,11 +336,11 @@ at 115200 8N1, with the adapter's TX going to the Pi's RX.
 5. `make firmware` and `make image`, then `tools/verify_image.py`, which also
    publishes the image size, file list and SHA-256 as an annotation;
 6. uploads `lumeos-sd-image` and `lumeos-kernel` artifacts;
-7. runs the QEMU boot test. **This step is currently informational**
-   (`continue-on-error: true`) because the kernel has not yet booted to the
-   point where the boot markers appear; the job records a detailed diagnosis
-   instead of failing the build. See [testing.md](testing.md) for exactly where
-   the boot currently stops.
+7. runs the QEMU boot test as a real gate - losing a boot marker, a self test
+   or the shell prompt fails the build. On failure the job also runs
+   `tests/qemu/diagnose_boot.py` and publishes the diagnosis as an annotation
+   and a log artifact, so a boot regression arrives with its own trace. See
+   [testing.md](testing.md) for what this proves and what only hardware can.
 
 A build of the SD image is therefore a CI artifact you can download and flash
 without building anything locally. It is **not** evidence that the kernel boots:
