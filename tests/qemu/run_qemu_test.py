@@ -239,6 +239,12 @@ def main(argv: list[str]) -> int:
           f"({args.image.stat().st_size} bytes), machine {args.machine}")
 
     failures: list[str] = []
+    # (strategy, last few console lines) - reprinted in the final report, which
+    # is the last thing this program writes to stdout.  That matters because CI
+    # lifts the tail of this log into an annotation and stdout is block
+    # buffered, so anything printed before the diagnostics block may as well not
+    # exist.
+    console_tails: list[tuple[str, list[str]]] = []
 
     for strategy in STRATEGIES:
         print(f"run_qemu_test: strategy '{strategy}': "
@@ -269,6 +275,8 @@ def main(argv: list[str]) -> int:
         for problem in problems:
             print(f"run_qemu_test:   - {problem}")
         failures.append(f"{strategy}: {reason}; " + "; ".join(problems))
+        if output.strip():
+            console_tails.append((strategy, output.strip().splitlines()[-4:]))
 
         if output.strip():
             tail = output.strip().splitlines()[-15:]
@@ -287,6 +295,17 @@ def main(argv: list[str]) -> int:
         for line in qemu_debug_pass(qemu, args.machine, STRATEGIES[0], args.image,
                                     args.diagnose_timeout, log_path):
             print(f"run_qemu_test: qemu-debug: {line}")
+
+    # ---- final report, deliberately the last thing on stdout ----
+    print("run_qemu_test: ---- failure report ----")
+    print("run_qemu_test: RESULT: no QEMU loading strategy booted the kernel to "
+          "all of its markers")
+    for failure in failures:
+        print(f"run_qemu_test: failed: {failure}")
+    for strategy, tail in console_tails:
+        print(f"run_qemu_test: console tail ({strategy}):")
+        for line in tail:
+            print(f"run_qemu_test:   | {line}")
 
     print("run_qemu_test: ERROR: no QEMU loading strategy booted the kernel",
           file=sys.stderr)

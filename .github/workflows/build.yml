@@ -167,7 +167,7 @@ jobs:
             # message appears.  Published with --tail so it is not filtered
             # through build-error patterns.
             python3 tools/ci_annotate.py qemu-test.log \
-                --title "qemu boot test" --tail 22 --max-chars 3500
+                --title "qemu boot test" --tail 30 --max-chars 3500
             exit 1
           fi
 
