@@ -52,6 +52,11 @@ def main(argv: list[str]) -> int:
     # GitHub truncates an annotation message at 4096 characters and keeps the
     # beginning, so stay clearly below that and put the diagnosis first.
     parser.add_argument("--max-chars", type=int, default=3500)
+    parser.add_argument("--tail", type=int, default=0,
+                        help="publish the last N lines as-is, ignoring the error "
+                             "patterns (use for test logs, where the interesting "
+                             "lines - the kernel's own last words - do not look "
+                             "like build errors)")
     args = parser.parse_args(argv)
 
     path = Path(args.logfile)
@@ -62,6 +67,15 @@ def main(argv: list[str]) -> int:
 
     text = path.read_text(errors="replace")
     lines = [line for line in text.splitlines() if line.strip()]
+
+    if args.tail > 0:
+        selected = [line for line in lines if line.strip()][-args.tail:]
+        header = f"last {len(selected)} line(s) of {args.logfile}\n"
+        tail = header + "\n".join(selected)
+        if len(tail) > args.max_chars:
+            tail = tail[:args.max_chars] + "\n... (truncated)"
+        print(f"::error title={escape(args.title or 'log tail')}::{escape(tail)}")
+        return 0
 
     matches = [line for line in lines if ERROR_PATTERNS.search(line)]
     if matches:
