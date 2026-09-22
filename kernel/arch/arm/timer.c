@@ -85,6 +85,11 @@ static void timer_service_tick(void)
     sched_tick();
 }
 
+u32 timer_status(void)
+{
+    return TIMER_REG(TIMER_CS);
+}
+
 void timer_irq_handler(void)
 {
     if (TIMER_REG(TIMER_CS) & TIMER_CS_M3)
@@ -114,7 +119,12 @@ static void systimer_irq(u32 irq, void *arg)
 
 void timer_register_irq(void)
 {
-    irq_register(IRQ_SYSTIMER_C3, "systimer", systimer_irq, NULL);
+    /* The compare channels are wired to the interrupt controller in a way that
+     * does not always show up in the shared pending registers (it depends on
+     * the SoC revision and, in QEMU, on how the timer is connected).  The
+     * handler checks the timer's own status register, so registering it as
+     * self-checking makes the tick work either way. */
+    irq_register_flags(IRQ_SYSTIMER_C3, "systimer", systimer_irq, NULL, 1);
     pr_debug("timer: registered on IRQ %u", IRQ_SYSTIMER_C3);
 }
 

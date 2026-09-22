@@ -29,6 +29,7 @@ int time_is_running(void);
 /* Generic time keeping initialisation. */
 void time_init(void);
 void timer_irq_handler(void);
+u32  timer_status(void);
 u32 timer_tick_hz(void);
 
 /* Register the timer's interrupt handler with the interrupt controller.  Kept

@@ -17,6 +17,14 @@ void irq_init(void);
 /** Register a handler for an interrupt number.  Returns 0 on success. */
 int irq_register(u32 irq, const char *name, void (*handler)(u32 irq, void *arg), void *arg);
 
+/* Register a handler for a source whose interrupt line is aggregated into the
+ * basic pending register, where the source cannot be identified.  Such a
+ * handler must check its own device status and do nothing when its device is
+ * not interrupting; do_irq() calls it even when the shared pending registers
+ * are empty, which is what keeps a level-triggered line from storming. */
+int irq_register_flags(u32 irq, const char *name, void (*handler)(u32, void *),
+                       void *arg, int self_checking);
+
 void irq_unregister(u32 irq);
 
 /** Globally enable/disable IRQ delivery and the CPSR.I mask. */
@@ -26,6 +34,8 @@ int  irq_is_enabled(void);
 
 u32 irq_total_count(void);
 u32 irq_spurious_count(void);
+u32 irq_unclaimed_count(void);
+u32 irq_fallback_count(void);
 
 /** Architecture entry points called from the assembly vectors. */
 void do_irq(struct trapframe *tf);

@@ -245,6 +245,7 @@ def main(argv: list[str]) -> int:
     # buffered, so anything printed before the diagnostics block may as well not
     # exist.
     console_tails: list[tuple[str, list[str]]] = []
+    selftest_lines: list[str] = []
 
     for strategy in STRATEGIES:
         print(f"run_qemu_test: strategy '{strategy}': "
@@ -277,6 +278,12 @@ def main(argv: list[str]) -> int:
         failures.append(f"{strategy}: {reason}; " + "; ".join(problems))
         if output.strip():
             console_tails.append((strategy, output.strip().splitlines()[-4:]))
+            for line in output.splitlines():
+                if "selftest:" in line and ("FAIL" in line or "passed" in line
+                                            or "checks" in line):
+                    entry = line.strip()
+                    if entry not in selftest_lines:
+                        selftest_lines.append(entry)
 
         if output.strip():
             tail = output.strip().splitlines()[-15:]
@@ -302,6 +309,10 @@ def main(argv: list[str]) -> int:
           "all of its markers")
     for failure in failures:
         print(f"run_qemu_test: failed: {failure}")
+    if selftest_lines:
+        print("run_qemu_test: in-kernel self tests reported:")
+        for line in selftest_lines[:12]:
+            print(f"run_qemu_test:   {line[:150]}")
     for strategy, tail in console_tails:
         print(f"run_qemu_test: console tail ({strategy}):")
         for line in tail:

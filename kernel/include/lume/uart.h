@@ -31,6 +31,7 @@ int uart_rx_ready(void);
 
 /** Enable/disable the receive interrupt (IRQ 57). */
 void uart_enable_rx_irq(int enable);
+u32  uart_irq_status(void);
 
 /** Drain and return one character from the interrupt handler. */
 int uart_irq_handler(void);

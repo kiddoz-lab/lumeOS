@@ -149,13 +149,36 @@ void uart_enable_rx_irq(int enable)
     arm_irq_restore(flags);
 }
 
+u32 uart_irq_status(void)
+{
+    return UART_REG(PL011_MIS);
+}
+
 int uart_irq_handler(void)
 {
     u32 mis = UART_REG(PL011_MIS);
+    u32 handled = PL011_IMSC_RXIM | PL011_IMSC_RTIM;
     int count = 0;
 
-    if (!(mis & (PL011_IMSC_RXIM | PL011_IMSC_RTIM)))
+    if (!(mis & handled)) {
+        /* Something the driver does not service is asserting the line: an
+         * overrun, break, framing or parity error (the PL011 raises those from
+         * its own status, and a bad cable or a floating RX pin is enough).
+         * Leaving them set would hold the interrupt line high and re-enter this
+         * handler forever, so acknowledge everything the UART reports and say
+         * so once - silently swallowing it would hide a real wiring problem. */
+        if (mis) {
+            static int reported;
+
+            if (!reported) {
+                reported = 1;
+                pr_warn("uart: unhandled interrupt status 0x%08x (cleared; "
+                        "check the serial wiring)", mis);
+            }
+            UART_REG(PL011_ICR) = mis;
+        }
         return 0;
+    }
 
     /* Drain the FIFO; the input layer consumes the characters. */
     while (!(UART_REG(PL011_FR) & PL011_FR_RXFE)) {
@@ -165,7 +188,9 @@ int uart_irq_handler(void)
         if (count > 64)
             break; /* stay bounded if the FIFO never empties */
     }
-    UART_REG(PL011_ICR) = PL011_ICR_RXIC | PL011_ICR_RTIC;
+    /* Clear both the receive and the (unmasked) status bits that came with it,
+     * so an error condition cannot keep the line asserted. */
+    UART_REG(PL011_ICR) = PL011_ICR_RXIC | PL011_ICR_RTIC | mis;
     return count;
 }
 

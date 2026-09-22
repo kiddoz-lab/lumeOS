@@ -15,6 +15,7 @@
 #include <lume/config.h>
 #include <lume/errno.h>
 #include <lume/input.h>
+#include <lume/irq.h>
 #include <lume/klog.h>
 #include <lume/mem.h>
 #include <lume/panic.h>
@@ -80,8 +81,10 @@ static void cmd_time(void)
 
 static void cmd_irq(void)
 {
-    pr_notice("irq: %u handled, %u spurious",
-              irq_total_count(), irq_spurious_count());
+    pr_notice("irq: %u handled, %u spurious, %u with no shared source pending "
+              "(%u serviced by driver self-check)",
+              irq_total_count(), irq_spurious_count(),
+              irq_unclaimed_count(), irq_fallback_count());
 }
 
 static void cmd_ps(void)
