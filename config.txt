@@ -1,0 +1,32 @@
+# LumeOS boot configuration for the Raspberry Pi Zero W (BCM2835, ARM1176JZF-S).
+#
+# This file is copied into the boot partition of the SD card image built by
+# `make image`.  The Raspberry Pi boot firmware (start.elf) reads it before it
+# loads the kernel; the settings below are the ones LumeOS actually depends on.
+#
+# Reference: Raspberry Pi documentation, config.txt ("legacy" options used by
+# the 32-bit boot firmware).
+
+# Load our kernel from the boot partition.  The firmware's default file name is
+# kernel.img too, but naming it explicitly keeps the intent obvious.
+kernel=kernel.img
+
+# Physical address the kernel is loaded at and jumped to.  0x8000 is the
+# 32-bit default and is exactly the load address LumeOS' linker script uses
+# (kernel/ld/lumeos.ld: LMA 0x8000, VMA 0xC0008000).
+kernel_address=0x8000
+
+# LumeOS does not read ATAGS or a command line from the firmware: memory sizes
+# come from the mailbox property interface (GET_ARM_MEMORY) and the kernel
+# command line is empty.  This stops start.elf from writing an ATAGS block into
+# low memory.
+disable_commandline_tags=1
+
+# Uncomment to make the firmware itself print early boot progress on the serial
+# port.  Useful when the board does not appear to boot at all; not needed for
+# normal operation.
+#uart_2ndstage=1
+
+# LumeOS brings up its own framebuffer request through the mailbox property
+# interface when the framebuffer driver is enabled (see docs/roadmap.md), so no
+# hdmi_* settings are needed here yet.

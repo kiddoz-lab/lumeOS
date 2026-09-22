@@ -1,0 +1,144 @@
+name: build
+
+# Builds LumeOS for the Raspberry Pi Zero W, runs the host and emulator tests,
+# and - when the Raspberry Pi boot firmware can be downloaded - publishes a
+# bootable SD card image as a workflow artifact.
+#
+# What the artifacts mean:
+#   lumeos-sd-image  build/lumeos-sd.img  flashable image (kernel + Raspberry Pi
+#                                         boot firmware), UNVERIFIED ON REAL
+#                                         HARDWARE - see docs/testing.md
+#   lumeos-kernel    build/kernel.img     flat kernel image the Pi firmware
+#                   build/lumeos.elf      linked ELF with symbols for debugging
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      # CI is strict on purpose: the ISA gate must actually run (no silent
+      # pass when capstone is missing) and QEMU must be present.
+      CHECK_ISA_FLAGS: --require-attributes --require-capstone
+      LUME_FIRMWARE_DIR: .firmware
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # LUME_BUILD_COMMIT is embedded in the kernel
+
+      - name: Install the ARM toolchain, QEMU and test dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              gcc-arm-none-eabi binutils-arm-none-eabi \
+              qemu-system-arm \
+              python3-capstone \
+              file
+          if ! python3 -c 'import capstone' 2>/dev/null; then
+            echo "python3-capstone unavailable, falling back to pip"
+            python3 -m pip install --break-system-packages capstone
+          fi
+
+      - name: Report tool versions
+        run: |
+          set -x
+          arm-none-eabi-gcc --version | head -1
+          arm-none-eabi-ld --version | head -1
+          python3 --version
+          python3 -c 'import capstone; print("capstone", capstone.__version__)'
+          qemu-system-arm --version | head -1
+
+      - name: Build the kernel (build/kernel.img)
+        run: |
+          set -o pipefail
+          make kernel 2>&1 | tee build-kernel.log
+
+      - name: Show the kernel image layout
+        run: |
+          python3 tools/elf2bin.py build/lumeos.elf build/kernel-verify.img \
+              --require-paddr 0x8000
+          cmp build/kernel.img build/kernel-verify.img
+          file build/kernel.img build/lumeos.elf
+          arm-none-eabi-size build/lumeos.elf || true
+
+      - name: Host unit tests (printf, string library, build tools)
+        run: make test-host
+
+      - name: Fetch the Raspberry Pi boot firmware
+        id: firmware
+        continue-on-error: true
+        run: sh tools/fetch-firmware.sh "$LUME_FIRMWARE_DIR"
+
+      - name: Build the bootable SD card image
+        id: image
+        if: steps.firmware.outcome == 'success'
+        run: |
+          set -o pipefail
+          make image 2>&1 | tee build-image.log
+          ls -l build/lumeos-sd.img
+          sha256sum build/lumeos-sd.img build/kernel.img
+
+      - name: Upload the SD card image
+        if: steps.image.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumeos-sd-image
+          path: build/lumeos-sd.img
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the kernel images and the ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumeos-kernel
+          path: |
+            build/kernel.img
+            build/lumeos.elf
+          if-no-files-found: error
+          retention-days: 30
+
+      # Emulator boot test.  Informational for now: the kernel has never been
+      # run under QEMU, so this step reports whether the image boots in QEMU's
+      # bcm2835 model without failing the build.  It becomes blocking as soon as
+      # a run shows the expected boot markers (see docs/testing.md).
+      - name: QEMU boot test (emulated, informational)
+        continue-on-error: true
+        run: |
+          python3 tests/qemu/run_qemu_test.py \
+              --image build/kernel.img --elf build/lumeos.elf \
+              --timeout 60 --required --machine raspi0
+
+      - name: Summarise the build
+        if: always()
+        run: |
+          {
+            echo "## LumeOS build"
+            echo
+            echo "- commit: \`$(git rev-parse --short HEAD)\`"
+            echo "- used zig cc: no (GNU arm-none-eabi-gcc as in docs/building.md)"
+            if [ -f build/kernel.img ]; then
+              echo "- kernel image: $(stat -c%s build/kernel.img) bytes"
+            fi
+            if [ -f build/lumeos-sd.img ]; then
+              echo "- SD card image: $(stat -c%s build/lumeos-sd.img) bytes"
+              echo "- sha256: \`$(sha256sum build/lumeos-sd.img | cut -d' ' -f1)\`"
+              echo
+              echo "**Flash this artifact to a microSD card and boot a Raspberry Pi"
+              echo "Zero W; nothing in this repository has been validated on real"
+              echo "hardware yet (docs/testing.md).**"
+            else
+              echo "- SD card image: **not built** (firmware download failed?)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

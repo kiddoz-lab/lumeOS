@@ -1,0 +1,42 @@
+# Build outputs
+build/
+out/
+*.o
+*.d
+*.su
+*.elf
+*.bin
+*.img
+*.map
+*.lst
+
+# Generated artifacts
+kernel/arch/arm/font8x16.c
+build-assets/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*~
+
+# Local toolchains and downloads (never commit these)
+/arm-none-eabi/
+/toolchain/
+/tools/downloads/
+firmware/
+raspi-firmware/
+*.tar.xz
+*.tar.gz
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Local test residue
+tests/qemu/logs/
+tests/qemu/*.log

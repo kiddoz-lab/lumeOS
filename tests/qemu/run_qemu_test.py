@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Boot the LumeOS kernel image under QEMU and verify that it comes up.
+
+Scope, stated plainly: this is an *emulator* test.  A pass here means the
+kernel image boots, runs its in-kernel self tests and reaches the shell *on
+QEMU's bcm2835 model*.  It is not evidence about a real Raspberry Pi Zero W:
+the SoC peripherals, the firmware, the SD card and the boot firmware chain are
+all simulated by QEMU, and several of them differ from the real hardware
+(see docs/testing.md).
+
+How the kernel gets into memory
+-------------------------------
+On a real board, the VideoCore firmware loads kernel.img at physical 0x8000 and
+jumps to its first byte.  QEMU offers several ways to emulate that, and they do
+not agree on the load address:
+
+  * ``-bios``      the raspi machines load this file at 0x8000 and set the
+                   entry point to 0x8000 -- the closest match to the firmware;
+  * ``-device loader,file=...,addr=0x8000,cpu-num=0``
+                   loads the file at an explicit address and starts the CPU
+                   there;
+  * ``-kernel``    QEMU's "direct Linux kernel" path, which treats a raw
+                   binary as a Linux kernel, puts it at 0x10000 and enters it
+                   through a Linux boot stub.
+
+Because LumeOS is linked for load address 0x8000, the script tries the
+strategies in the order above and reports which one produced a boot.  The
+strategies only differ in *how the emulator loads a bare-metal image*; every
+strategy is checked against the same boot markers.
+
+Usage:
+    tests/qemu/run_qemu_test.py --image build/kernel.img
+    tests/qemu/run_qemu_test.py --image build/kernel.img --qemu /usr/bin/qemu-system-arm
+
+Exit status: 0 when the kernel boots, 1 when it does not, and 0 with a SKIP
+message when qemu-system-arm is not installed (use --required to make that a
+failure instead).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+
+# Strings the kernel prints during a successful boot.  They come from
+# kernel/kernel/main.c and kernel/kernel/selftest.c.
+BOOT_MARKERS = [
+    "LumeOS 0.1.0 (armv6kz)",
+    "selftest: running kernel self tests",
+    "LumeOS: boot complete",
+    "main: entering the idle loop",
+]
+
+# "selftest: 24/24 checks passed"
+SELFTEST_RE = re.compile(r"selftest: (\d+)/(\d+) checks passed")
+MIN_SELFTEST_CHECKS = 15
+
+FAILURE_PATTERNS = [
+    "PANIC",
+    "checks FAILED",
+    "FAIL ",
+    "Oops",
+]
+
+
+def qemu_argv(qemu: str, machine: str, strategy: str, image: Path) -> list[str]:
+    base = [qemu, "-M", machine, "-display", "none", "-monitor", "none",
+            "-serial", "stdio", "-rtc", "base=utc"]
+    if strategy == "bios":
+        return base + ["-bios", str(image)]
+    if strategy == "loader":
+        return base + ["-device", f"loader,file={image},addr=0x8000,cpu-num=0"]
+    if strategy == "kernel":
+        return base + ["-kernel", str(image)]
+    raise ValueError(strategy)
+
+
+STRATEGIES = ("bios", "loader", "kernel")
+
+
+def run_once(qemu: str, machine: str, strategy: str, image: Path,
+             timeout: float) -> tuple[str, int, str]:
+    """Run QEMU until the timeout (a booted LumeOS never exits) and capture output."""
+    argv = qemu_argv(qemu, machine, strategy, image)
+    try:
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=timeout, text=True, errors="replace")
+        return "exited", proc.returncode, proc.stdout
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        # Timeout is the expected outcome for an OS that never powers off.
+        return "timeout", 0, output
+
+
+def evaluate(output: str) -> tuple[bool, list[str]]:
+    problems: list[str] = []
+
+    for marker in BOOT_MARKERS:
+        if marker not in output:
+            problems.append(f"missing boot marker: {marker!r}")
+
+    for pattern in FAILURE_PATTERNS:
+        if pattern in output:
+            problems.append(f"output contains failure pattern: {pattern!r}")
+
+    match = SELFTEST_RE.search(output)
+    if not match:
+        problems.append("no 'selftest: N/M checks passed' summary line")
+    else:
+        passed, total = int(match.group(1)), int(match.group(2))
+        if passed != total:
+            problems.append(f"in-kernel self tests failed: {passed}/{total} passed")
+        if total < MIN_SELFTEST_CHECKS:
+            problems.append(f"only {total} self test checks ran (expected at least "
+                            f"{MIN_SELFTEST_CHECKS})")
+
+    return (not problems), problems
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--image", type=Path, required=True,
+                        help="flat kernel image (build/kernel.img)")
+    parser.add_argument("--elf", type=Path, default=None,
+                        help="linked kernel ELF; used only for the log line")
+    parser.add_argument("--qemu", default="qemu-system-arm")
+    parser.add_argument("--machine", default="raspi0")
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="seconds to let the kernel run before checking output")
+    parser.add_argument("--required", action="store_true",
+                        help="fail (instead of skipping) when QEMU is not installed")
+    args = parser.parse_args(argv)
+
+    qemu = shutil.which(args.qemu)
+    if qemu is None and os.path.exists(args.qemu):
+        qemu = args.qemu
+    if qemu is None:
+        message = (f"qemu-system-arm not found ({args.qemu}); skipping the emulator "
+                   "boot test.  Install qemu-system-arm to run it locally.")
+        if args.required or os.environ.get("CI"):
+            print(f"run_qemu_test: ERROR: {message}", file=sys.stderr)
+            return 1
+        print(f"run_qemu_test: SKIP: {message}", file=sys.stderr)
+        return 0
+
+    if not args.image.is_file():
+        print(f"run_qemu_test: ERROR: kernel image {args.image} does not exist",
+              file=sys.stderr)
+        return 1
+
+    version = subprocess.run([qemu, "--version"], capture_output=True, text=True)
+    print(f"run_qemu_test: {version.stdout.strip().splitlines()[0]}")
+    print(f"run_qemu_test: image {args.image} "
+          f"({args.image.stat().st_size} bytes), machine {args.machine}")
+
+    failures: list[str] = []
+
+    for strategy in STRATEGIES:
+        print(f"run_qemu_test: strategy '{strategy}': "
+              f"{' '.join(qemu_argv(qemu, args.machine, strategy, args.image))}")
+        how, code, output = run_once(qemu, args.machine, strategy, args.image,
+                                     args.timeout)
+        ok, problems = evaluate(output)
+
+        if ok:
+            match = SELFTEST_RE.search(output)
+            print(f"run_qemu_test: PASS via '{strategy}' "
+                  f"(kernel self tests {match.group(1)}/{match.group(2)}, "
+                  f"booting in QEMU's {args.machine} model)")
+            print("run_qemu_test: --- kernel console output ---")
+            print(output.rstrip())
+            print("run_qemu_test: --- end of console output ---")
+            print("run_qemu_test: NOTE: emulator result only; a real Raspberry Pi "
+                  "Zero W boot is still unverified (see docs/testing.md).")
+            return 0
+
+        if how == "exited" and code == 0 and not output.strip():
+            reason = "QEMU exited immediately without any guest output"
+        elif how == "exited":
+            reason = f"QEMU exited early (status {code})"
+        else:
+            reason = f"no boot within {args.timeout:g}s"
+        print(f"run_qemu_test: strategy '{strategy}' failed: {reason}")
+        for problem in problems:
+            print(f"run_qemu_test:   - {problem}")
+        failures.append(f"{strategy}: {reason}; " + "; ".join(problems))
+
+        if output.strip():
+            tail = output.strip().splitlines()[-15:]
+            print("run_qemu_test:   last output:")
+            for line in tail:
+                print(f"run_qemu_test:     | {line}")
+
+    print("run_qemu_test: ERROR: no QEMU loading strategy booted the kernel",
+          file=sys.stderr)
+    for failure in failures:
+        print(f"run_qemu_test:   {failure}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
