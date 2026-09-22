@@ -102,6 +102,76 @@ def run_once(qemu: str, machine: str, strategy: str, image: Path,
         return "timeout", 0, output
 
 
+
+def qemu_memory_tree(qemu: str, machine: str) -> list[str]:
+    """Ask QEMU where it mapped the peripherals (``info mtree`` via the monitor).
+
+    This answers the question that decides whether a kernel can talk to the
+    UART at all: is the BCM2835 peripheral block visible at the address the
+    kernel's memory map assumes (0x20000000 on a Pi 1)?
+    """
+    argv = [qemu, "-M", machine, "-display", "none", "-serial", "none",
+            "-monitor", "stdio", "-S"]
+    try:
+        proc = subprocess.run(argv, input="info mtree\nquit\n",
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return [f"(could not read the QEMU memory tree: {exc})"]
+
+    interesting = []
+    for line in proc.stdout.splitlines():
+        low = line.lower()
+        if ("bcm2835" in low or "uart" in low or "peripheral" in low
+                or "system" in low or "ram" == low.strip()):
+            interesting.append(line.rstrip())
+    return interesting[:60]
+
+
+def qemu_debug_pass(qemu: str, machine: str, strategy: str, image: Path,
+                    timeout: float, log_path: Path) -> list[str]:
+    """Run one boot attempt with QEMU's own diagnostics enabled.
+
+    ``-d int,unimp,guest_errors,cpu_reset`` makes QEMU report exceptions taken
+    by the guest, accesses to unimplemented or unassigned addresses and CPU
+    resets.  If the kernel dies early, this is where the reason shows up.
+    """
+    argv = qemu_argv(qemu, machine, strategy, image) + [
+        "-d", "int,unimp,guest_errors,cpu_reset", "-D", str(log_path)]
+    try:
+        subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=timeout, text=True)
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError as exc:
+        return [f"(could not start the QEMU debug pass: {exc})"]
+
+    if not log_path.is_file():
+        return ["(QEMU wrote no debug log)"]
+
+    lines = [line for line in log_path.read_text(errors="replace").splitlines()
+             if line.strip()]
+    report = [f"QEMU debug log: {log_path} ({len(lines)} lines)"]
+
+    hits = [line for line in lines
+            if ("unimp" in line.lower() or "unassigned" in line.lower()
+                or "invalid" in line.lower() or "guest error" in line.lower())]
+    if hits:
+        report.append(f"unimplemented/unassigned accesses ({len(hits)} lines), first 20:")
+        report.extend(f"  {line}" for line in hits[:20])
+    else:
+        report.append("no unimplemented/unassigned accesses logged")
+
+    resets = [line for line in lines if "reset" in line.lower()]
+    if resets:
+        report.append("CPU reset events (first 5):")
+        report.extend(f"  {line}" for line in resets[:5])
+
+    report.append("last 15 lines of the emulator log:")
+    report.extend(f"  {line}" for line in lines[-15:])
+    return report
+
+
 def evaluate(output: str) -> tuple[bool, list[str]]:
     problems: list[str] = []
 
@@ -138,6 +208,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--machine", default="raspi0")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="seconds to let the kernel run before checking output")
+    parser.add_argument("--no-diagnostics", action="store_true",
+                        help="skip the extra QEMU runs that explain a failure")
+    parser.add_argument("--diagnose-timeout", type=float, default=10.0,
+                        help="seconds per diagnostic QEMU run")
     parser.add_argument("--required", action="store_true",
                         help="fail (instead of skipping) when QEMU is not installed")
     args = parser.parse_args(argv)
@@ -201,6 +275,18 @@ def main(argv: list[str]) -> int:
             print("run_qemu_test:   last output:")
             for line in tail:
                 print(f"run_qemu_test:     | {line}")
+
+    if not args.no_diagnostics:
+        print("run_qemu_test: diagnostics: asking QEMU where the peripherals are")
+        for line in qemu_memory_tree(qemu, args.machine):
+            print(f"run_qemu_test: mtree: {line}")
+
+        print("run_qemu_test: diagnostics: booting the bios strategy with "
+              "QEMU's own debug log enabled")
+        log_path = args.image.parent / "qemu-debug.log"
+        for line in qemu_debug_pass(qemu, args.machine, STRATEGIES[0], args.image,
+                                    args.diagnose_timeout, log_path):
+            print(f"run_qemu_test: qemu-debug: {line}")
 
     print("run_qemu_test: ERROR: no QEMU loading strategy booted the kernel",
           file=sys.stderr)

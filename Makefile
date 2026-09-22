@@ -123,6 +123,8 @@ $(KERNEL_IMG): $(KERNEL)
 image: kernel
 	$(PYTHON) tools/mkimage.py --kernel $(KERNEL_IMG) \
 	    --firmware-dir $${LUME_FIRMWARE_DIR:-.firmware} --out $(BUILD)/lumeos-sd.img
+	$(PYTHON) tools/verify_image.py --image $(BUILD)/lumeos-sd.img \
+	    --kernel $(KERNEL_IMG) --firmware-dir $${LUME_FIRMWARE_DIR:-.firmware}
 
 firmware:
 	sh tools/fetch-firmware.sh $${LUME_FIRMWARE_DIR:-.firmware}

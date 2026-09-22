@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(REPO / "tools"))
 import check_isa  # noqa: E402
 import elf2bin  # noqa: E402
 import mkimage  # noqa: E402
+import verify_image  # noqa: E402
 
 
 class Fat16Tests(unittest.TestCase):
@@ -99,6 +101,64 @@ class Fat16Tests(unittest.TestCase):
             out += fat[offset:offset + spc * 512]
             cluster = struct.unpack_from("<H", fat, fat_start + cluster * 2)[0]
         return bytes(out[:size])
+
+    def test_round_trip_through_verify_image(self):
+        """The verifier must accept an image this builder produced."""
+        with tempfile.TemporaryDirectory(prefix="lume-verify-") as tmp:
+            image_path = Path(tmp) / "sd.img"
+            kernel_path = Path(tmp) / "kernel.img"
+            image_path.write_bytes(self.image)
+            kernel_path.write_bytes(self.FILES["kernel.img"])
+
+            files = dict(self.FILES)
+            files["bootcode.bin"] = b"\x00" * 4096
+            files["start.elf"] = b"\x01" * 8192
+            files["fixup.dat"] = b"\x02" * 1024
+            firmware = Path(tmp) / "firmware"
+            firmware.mkdir()
+            for name, data in files.items():
+                (firmware / name).write_bytes(data)
+
+            full = mkimage.build_image(files, size_mib=8)
+            image_path.write_bytes(full)
+            kernel_path.write_bytes(files["kernel.img"])
+
+            details = verify_image.verify(image_path, kernel_path, firmware)
+            self.assertTrue(details["kernel_matches_build"])
+            self.assertEqual(details["partition_start"], mkimage.PARTITION_START)
+            self.assertEqual(details["label"], "LUMEOS")
+            for name in ("KERNEL.IMG", "START.ELF", "BOOTCODE.BIN", "FIXUP.DAT"):
+                self.assertIn(name, details["files"])
+
+    def test_verifier_rejects_a_corrupted_file(self):
+        """Corrupt one byte of KERNEL.IMG's data: the FAT stays valid, so only
+        the content comparison can catch it."""
+        files = dict(self.FILES)
+        files["bootcode.bin"] = b"\x00" * 4096
+        files["start.elf"] = b"\x01" * 8192
+        files["fixup.dat"] = b"\x02" * 1024
+        image = bytearray(mkimage.build_image(files, size_mib=8))
+
+        # Locate KERNEL.IMG's first cluster through the FAT structures.
+        partition = image[mkimage.PARTITION_START * 512:]
+        bpb = verify_image.parse_bpb(partition)
+        root = verify_image.read_root_directory(partition, bpb)
+        first_cluster, _size = root["KERNEL.IMG"]
+        data_start = ((bpb["reserved"] + bpb["num_fats"] * bpb["fat_size"]
+                       + bpb["root_dir_sectors"]) * bpb["bytes_per_sector"])
+        offset = mkimage.PARTITION_START * 512 + data_start + \
+            (first_cluster - 2) * bpb["sectors_per_cluster"] * bpb["bytes_per_sector"]
+        image[offset] ^= 0xFF
+
+        with tempfile.TemporaryDirectory(prefix="lume-verify-") as tmp:
+            image_path = Path(tmp) / "sd.img"
+            image_path.write_bytes(bytes(image))
+            kernel_path = Path(tmp) / "kernel.img"
+            kernel_path.write_bytes(files["kernel.img"])
+
+            with self.assertRaises(verify_image.VerifyError) as ctx:
+                verify_image.verify(image_path, kernel_path, None)
+            self.assertIn("KERNEL.IMG", str(ctx.exception))
 
     def test_refuses_tiny_image(self):
         with self.assertRaises(mkimage.ImageError):

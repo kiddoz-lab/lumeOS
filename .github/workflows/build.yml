@@ -116,6 +116,13 @@ jobs:
           ls -l build/lumeos-sd.img
           sha256sum build/lumeos-sd.img build/kernel.img
 
+      - name: Verify the SD card image (MBR, FAT16, boot files, contents)
+        if: steps.image.outcome == 'success'
+        run: |
+          python3 tools/verify_image.py --image build/lumeos-sd.img \
+              --kernel build/kernel.img --firmware-dir "$LUME_FIRMWARE_DIR" \
+              --annotation | tee verify-image.log
+
       - name: Upload the SD card image
         if: steps.image.outcome == 'success'
         uses: actions/upload-artifact@v7

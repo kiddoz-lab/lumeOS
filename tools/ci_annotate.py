@@ -26,7 +26,8 @@ from pathlib import Path
 ERROR_PATTERNS = re.compile(
     r"(error:|Error \d|undefined reference|undefined symbol|cannot find|"
     r"no such file|collect2|FAILED|FAIL:|Traceback|AssertionError|"
-    r"unrecognized|not found|Permission denied)",
+    r"unrecognized|not found|Permission denied|"
+    r"unimp|unassigned|no boot within|strategy '.*' failed|PANIC)",
     re.IGNORECASE)
 
 
