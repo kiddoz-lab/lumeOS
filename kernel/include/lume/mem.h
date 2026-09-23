@@ -123,4 +123,25 @@ int copy_from_user(void *dst, const void *user_src, u32 len);
 int clear_user(void *user_dst, u32 len);
 int strncpy_from_user(char *dst, const char *user_src, u32 max);
 
+/*
+ * The same operations against an address space that is *not* the current one.
+ *
+ * A syscall runs with the caller's address space active, so the versions above
+ * are what it wants.  Booting is the other case: the kernel builds the first
+ * process's stack (and any future exec() argument vector) before that process
+ * has ever been scheduled, while the MMU is still on the kernel's own tables.
+ * Validating against "the current space" there would fail every copy - which is
+ * exactly what happened the first time init was started, and the symptom was a
+ * prefetch abort from a process whose entry point had never been set because
+ * the stack build had failed.
+ *
+ * `as` may be NULL, which means the current space.
+ */
+struct vm_space;
+int copy_to_user_as(struct vm_space *as, void *user_dst, const void *src, u32 len);
+int copy_from_user_as(struct vm_space *as, void *dst, const void *user_src, u32 len);
+int clear_user_as(struct vm_space *as, void *user_dst, u32 len);
+int clear_user(void *user_dst, u32 len);
+int strncpy_from_user(char *dst, const char *user_src, u32 max);
+
 #endif /* LUME_MEM_H */

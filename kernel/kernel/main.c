@@ -110,6 +110,12 @@ static void init_watchdog(void *arg)
  * then argc, exactly as the Linux ABI describes process entry
  * (see docs/userspace.md section 2).  Returns the stack pointer to start with,
  * or 0 on failure.
+ *
+ * Every store goes through copy_to_user_as() with `p`'s address space, not
+ * through copy_to_user(): the process has not been scheduled yet, so the MMU is
+ * still on the kernel's tables and "the current space" is the wrong space to
+ * validate against.  That distinction is the reason those functions take a
+ * space argument at all.
  */
 static u32 build_user_stack(struct process *p, const char **argv_in, u32 argc)
 {
@@ -143,7 +149,7 @@ static u32 build_user_stack(struct process *p, const char **argv_in, u32 argc)
 
         sp -= len;
         sp &= ~7u;
-        if (copy_to_user((void *)sp, argv_in[i], len) < 0)
+        if (copy_to_user_as(p->as, (void *)sp, argv_in[i], len) < 0)
             return 0;
         argv_user[i] = sp;
     }
@@ -152,15 +158,15 @@ static u32 build_user_stack(struct process *p, const char **argv_in, u32 argc)
      * NULL for the (currently empty) environment. */
     sp &= ~7u;
     sp -= 4;
-    if (copy_to_user((void *)sp, &zero_word, 4) < 0)   /* envp[0] = NULL */
+    if (copy_to_user_as(p->as, (void *)sp, &zero_word, 4) < 0)  /* envp[0] = NULL */
         return 0;
     for (i = argc; i > 0; i--) {
         sp -= 4;
-        if (copy_to_user((void *)sp, &argv_user[i - 1], 4) < 0)
+        if (copy_to_user_as(p->as, (void *)sp, &argv_user[i - 1], 4) < 0)
             return 0;
     }
     sp -= 4;
-    if (copy_to_user((void *)sp, &argc, 4) < 0)
+    if (copy_to_user_as(p->as, (void *)sp, &argc, 4) < 0)
         return 0;
 
     (void)argv_local;

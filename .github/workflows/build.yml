@@ -190,6 +190,13 @@ jobs:
             # through build-error patterns.
             python3 tools/ci_annotate.py qemu-test.log \
                 --title "qemu boot test" --tail 30 --max-chars 3500
+            # The userspace hand-off speaks in its own vocabulary, and when it
+            # is what failed, these are the lines that say why.  Publishing them
+            # separately keeps them out of the way of the tail above when it is
+            # something else that broke.
+            python3 tools/ci_annotate.py qemu-test.log \
+                --title "userspace hand-off" --grep "init:|syscall:|elf:" \
+                --max-chars 3000
             exit 1
           fi
           # Record the result of a passing boot too: "the emulator booted the
