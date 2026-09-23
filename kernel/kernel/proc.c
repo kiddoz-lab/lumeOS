@@ -168,6 +168,35 @@ void proc_note_thread_exit(struct process *p, int code)
         p->exit_code = code & 0xFF;
 }
 
+/*
+ * Discard a process whose creation did not finish.  Distinct from proc_exit(),
+ * which is for a *running* process: this one puts the table slot, the address
+ * space, the file descriptors and the thread back where they were, so a failed
+ * bring-up leaves nothing behind and reports only its own error.
+ */
+void proc_discard(struct process *p, struct process *parent)
+{
+    if (!p || p == current)
+        return;
+
+    if (p->thread) {
+        thread_discard(p->thread);
+        p->thread = NULL;
+    }
+    fd_close_all(p);
+    if (p->as) {
+        vmm_space_destroy(p->as);
+        p->as = NULL;
+    }
+    if (parent) {
+        for (u32 i = 0; i < LUME_MAX_PROCESSES; i++)
+            if (parent->children[i] == p)
+                parent->children[i] = NULL;
+    }
+    memset(p, 0, sizeof(*p));
+    p->state = PROC_STATE_UNUSED;
+}
+
 void proc_exit(struct process *p, int code)
 {
     struct process *parent;

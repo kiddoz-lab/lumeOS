@@ -95,6 +95,33 @@ struct thread *thread_create_user(struct process *proc, const char *name,
     return t;
 }
 
+/*
+ * Undo a thread that was created but never started.
+ *
+ * proc_create() enqueues the new thread as soon as it exists, so a failure in
+ * the *rest* of the setup (loading the image, building the stack) leaves a
+ * runnable thread with an entry point of 0.  The first version of the init
+ * hand-off did exactly that, and the result was a report that read "killing pid
+ * 1: prefetch abort" - a fault blamed on a program that had never been given an
+ * entry point, hiding the kernel-side failure that was the real cause.
+ */
+void thread_discard(struct thread *t)
+{
+    u32 flags;
+
+    if (!t)
+        return;
+    flags = arm_irq_save();
+    if (t->state != THREAD_UNUSED)
+        sched_remove_thread(t);
+    if (t->kstack_pa) {
+        pmm_free_page(t->kstack_pa);
+        t->kstack_pa = 0;
+    }
+    memset(t, 0, sizeof(*t));   /* back to THREAD_UNUSED */
+    arm_irq_restore(flags);
+}
+
 void thread_exit(int code)
 {
     struct thread *t = thread_current();

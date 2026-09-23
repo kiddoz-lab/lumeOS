@@ -54,6 +54,16 @@ void sched_enqueue_thread(struct thread *t)
     ready_enqueue(t);
 }
 
+/* Take a thread out of the ready queue.  Used when a thread is thrown away
+ * before it ever ran (see thread_discard()); leaving it queued would let the
+ * scheduler pick a thread whose stack has already been returned to the page
+ * allocator. */
+void sched_remove_thread(struct thread *t)
+{
+    if (t)
+        ready_remove(t);
+}
+
 void thread_init_subsystem(void)
 {
     memset(threads, 0, sizeof(threads));

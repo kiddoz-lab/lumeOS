@@ -91,6 +91,10 @@ void proc_note_thread_exit(struct process *p, int code);
  *  rusage) semantics with options = WNOHANG supported. */
 int proc_wait(struct process *parent, s32 pid, u32 options, u32 *status_out);
 
+/** Undo a process whose creation did not complete (nothing to reap, nothing
+ *  left behind).  Not for a running process: that is proc_exit(). */
+void proc_discard(struct process *p, struct process *parent);
+
 /** Deliver an exit status to the parent and mark the process as a zombie. */
 void proc_exit(struct process *p, int code) __noreturn;
 

@@ -198,8 +198,9 @@ struct process *init_start(struct process *launcher)
     }
 
     if (elf_load(p->as, lume_init_elf, lume_init_elf_size, &image) < 0) {
-        arm_irq_restore(flags);
         pr_err("init: the embedded image did not load");
+        proc_discard(p, launcher);
+        arm_irq_restore(flags);
         return NULL;
     }
     proc_set_brk_base(p, image.image_end);
@@ -208,8 +209,9 @@ struct process *init_start(struct process *launcher)
     argv[1] = NULL;
     sp = build_user_stack(p, argv, 1);
     if (!sp) {
-        arm_irq_restore(flags);
         pr_err("init: cannot build the initial stack");
+        proc_discard(p, launcher);
+        arm_irq_restore(flags);
         return NULL;
     }
 

@@ -57,6 +57,8 @@ void sched_enqueue_thread(struct thread *t);
 struct thread *thread_create(const char *name, void (*fn)(void *), void *arg);
 struct thread *thread_create_user(struct process *proc, const char *name,
                                   u32 entry, u32 user_sp, u32 arg);
+void thread_discard(struct thread *t);
+void sched_remove_thread(struct thread *t);
 void thread_exit(int code) __noreturn;
 void kthread_exit(void) __noreturn;
 
