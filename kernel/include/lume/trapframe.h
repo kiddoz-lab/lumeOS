@@ -18,10 +18,25 @@
  *   0x40 pc (the address execution resumes at)
  *   0x44 cpsr (the program status the thread had before the exception)
  *
- * The pc/cpsr pair is deliberately the last two words: the ARMv6 Store
- * Return State instruction (SRSDB, "exception processing enhancements"
- * introduced in ARMv6) writes lr_<mode>/spsr_<mode> straight into that pair,
- * which is how the IRQ path builds the frame in two instructions.
+ * The pc/cpsr pair is deliberately the last two words: the ARMv6 Store Return
+ * State instruction (SRSDB) writes lr_<mode>/spsr_<mode> straight into that
+ * pair, so a future entry stub can build the tail of the frame in one
+ * instruction.  The current entry macro in arch/arm/vectors.S writes the whole
+ * frame explicitly instead, which is slower by three instructions and easier to
+ * read.
+ *
+ * What tf->sp and tf->lr mean depends on where the trap came from, and the
+ * entry code is what makes it true:
+ *
+ *   - from user mode (or System mode): the *user bank* sp/lr, captured with
+ *     "stmdb ..., {sp, lr}^".  This is the pair a new user thread's initial
+ *     context is built from, and what __restore_regs loads back.
+ *   - from a privileged mode: tf->sp is the interrupted SVC stack pointer and
+ *     tf->lr is the resume address, i.e. the same value as tf->pc.  (An
+ *     exception from SVC mode overwrites lr_svc by definition, so the
+ *     interrupted value of r14 does not exist; for traps from other modes the
+ *     banked lr is preserved by the hardware and never needs saving.)  Nothing
+ *     may consume tf->sp of a privileged-origin frame as a user stack pointer.
  */
 #ifndef LUME_TRAPFRAME_H
 #define LUME_TRAPFRAME_H

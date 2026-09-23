@@ -20,6 +20,7 @@
 #include <lume/string.h>
 #include <lume/time.h>
 #include <lume/trapframe.h>
+#include <lume/traptest.h>
 #include <lume/types.h>
 
 static int tests_run;
@@ -215,6 +216,55 @@ static void test_division(void)
     check("u64 mul", 0x100000000ull * 3ull == 0x300000000ull);
 }
 
+/*
+ * The exception path, measured rather than assumed.  arch/arm/trapprobe.S takes
+ * an SVC with every register set to a known pattern; this reads what the
+ * handler saw and what came back.  The two checks that matter most are the last
+ * two: a kernel that loses a register or leaks stack per syscall still boots,
+ * and then fails in the least diagnosable way possible once a program is
+ * running.
+ */
+static void test_trapframe(void)
+{
+    struct traptest_report *r = &traptest_report;
+    int faithful = 1;
+    u32 i;
+
+    traptest_reset();
+    arch_trap_probe_run();
+
+    check("svc probe reached the handler", r->calls == 1);
+    check("svc probe finished", r->finished == 1);
+
+    for (i = 0; i < TRAPTEST_REGS; i++) {
+        if (r->frame[i] != TRAPTEST_PATTERN(i)) {
+            faithful = 0;
+            pr_err("selftest: trap frame r%u = 0x%08x, expected 0x%08x",
+                   i, r->frame[i], TRAPTEST_PATTERN(i));
+        }
+    }
+
+    if ((r->frame_cpsr & CPSR_MODE_MASK) != MODE_SVC)
+        pr_err("selftest: trap frame mode = 0x%02x, expected SVC (0x%02x)",
+               r->frame_cpsr & CPSR_MODE_MASK, MODE_SVC);
+    if (r->frame_sp != r->sp_at_svc)
+        pr_err("selftest: trap frame sp = 0x%08x, sp at the svc was 0x%08x",
+               r->frame_sp, r->sp_at_svc);
+    if (r->sp_after != r->sp_at_svc)
+        pr_err("selftest: sp drifted from 0x%08x to 0x%08x across the svc",
+               r->sp_at_svc, r->sp_after);
+    if (r->clobber)
+        pr_err("selftest: registers changed across the svc (bitmap 0x%04x)", r->clobber);
+
+    check("trap frame r0-r12 faithful", faithful);
+    check("trap frame pc is the resume address", r->frame_pc == r->resume);
+    check("trap frame is a kernel-mode frame",
+          (r->frame_cpsr & CPSR_MODE_MASK) == MODE_SVC);
+    check("trap frame sp is the interrupted sp", r->frame_sp == r->sp_at_svc);
+    check("registers survive the round trip", r->clobber == 0);
+    check("stack pointer survives the round trip", r->sp_after == r->sp_at_svc);
+}
+
 void selftest_run(void)
 {
     tests_run = 0;
@@ -229,6 +279,7 @@ void selftest_run(void)
     test_timer();
     test_vmm();
     test_proc();
+    test_trapframe();
 
     if (tests_failed == 0)
         pr_notice("selftest: %d/%d checks passed", tests_run - tests_failed, tests_run);

@@ -84,6 +84,7 @@ KERNEL_C := \
     kernel/arch/arm/context.c \
     kernel/arch/arm/mmu.c \
     kernel/arch/arm/timer.c \
+    kernel/arch/arm/traptest.c \
     kernel/drivers/uart_pl011.c \
     kernel/drivers/gpio.c \
     kernel/drivers/mbox.c \
@@ -92,8 +93,11 @@ KERNEL_C := \
 KERNEL_S := \
     kernel/arch/arm/boot.S \
     kernel/arch/arm/vectors.S \
-    kernel/arch/arm/aeabi_div.S
+    kernel/arch/arm/aeabi_div.S \
+    kernel/arch/arm/trapprobe.S
 
+# Note: a .c and a .S file with the same stem (foo.c and foo.S) would both
+# become $(BUILD)/foo.o and be linked twice - keep the stems distinct.
 KERNEL_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(KERNEL_C)) \
                $(patsubst %.S,$(BUILD)/%.o,$(KERNEL_S))
 

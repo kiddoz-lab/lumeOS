@@ -22,6 +22,7 @@
 #include <lume/sched.h>
 #include <lume/string.h>
 #include <lume/trapframe.h>
+#include <lume/traptest.h>
 #include <lume/types.h>
 
 /* Fault status codes (ARMv6, ARM1176 TRM 3.4.4). */
@@ -141,13 +142,22 @@ void do_pabt(struct trapframe *tf)
  */
 void do_syscall(struct trapframe *tf)
 {
+    /* The exception round-trip self test (lume/traptest.h) sends an SVC whose
+     * number is distinguishable from any real one and expects the frame back.
+     * Only a privileged caller can be the probe: a user program must not be
+     * able to make the kernel record frames on demand. */
+    if (tf->r[7] == TRAPTEST_SVC_NUMBER && (tf->cpsr & CPSR_MODE_MASK) != MODE_USR) {
+        traptest_capture(tf);
+        return;
+    }
+
     pr_err("syscall: SVC with r7=%u (0x%x) from %s mode, pc=0x%08x",
-           tf->r[7], tf->r[7], (tf->cpsr & 0x1F) == MODE_USR ? "user" : "kernel",
+           tf->r[7], tf->r[7], (tf->cpsr & CPSR_MODE_MASK) == MODE_USR ? "user" : "kernel",
            tf->pc);
     pr_err("syscall: the LumeOS syscall layer is not implemented yet "
            "(docs/roadmap.md)");
 
-    if ((tf->cpsr & 0x1F) == MODE_USR)
+    if ((tf->cpsr & CPSR_MODE_MASK) == MODE_USR)
         proc_exit(proc_current(), 128 + 31 /* SIGSYS */);
 
     panic("supervisor call from kernel mode at pc=0x%08x", tf->pc);
