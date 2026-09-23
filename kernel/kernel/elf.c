@@ -169,16 +169,30 @@ int elf_load(struct vm_space *as, const u8 *image, u32 size,
         flags = user_flags_for(ph->p_flags);
 
         for (va = first; va < last; va += PAGE_SIZE) {
-            u32 pa = pmm_alloc_page();
             u32 page_off = va - first;
+            u32 pa = 0;
             u8 *page;
 
-            if (!pa) {
-                pr_err("elf: out of memory mapping segment %u", i);
-                goto fail;
+            /*
+             * Two PT_LOAD segments may legally share a page - a read-only
+             * segment ending in the same 4 KiB page as a writable one starts
+             * is the common case, and it is what the toolchain here produces
+             * for a program with .text and .rodata but no .data.  Reuse the
+             * page that is already mapped instead of allocating a fresh one,
+             * or the second segment's contents replace the first's and the
+             * program executes zeroes.
+             */
+            if (vmm_translate(as, va, &pa) == 0 && pa) {
+                page = (u8 *)PHYS_TO_VIRT(pa);
+            } else {
+                pa = pmm_alloc_page();
+                if (!pa) {
+                    pr_err("elf: out of memory mapping segment %u", i);
+                    goto fail;
+                }
+                page = (u8 *)PHYS_TO_VIRT(pa);
+                memset(page, 0, PAGE_SIZE);
             }
-            page = (u8 *)PHYS_TO_VIRT(pa);
-            memset(page, 0, PAGE_SIZE);
 
             /* Copy the file-backed part of this page, if any.  For the page
              * holding p_vaddr the contents start at an offset inside it. */
@@ -211,7 +225,9 @@ int elf_load(struct vm_space *as, const u8 *image, u32 size,
 
     /* Make the loaded image executable.  The kernel wrote those pages through
      * its linear mapping, so translate each one back to a kernel address,
-     * clean the data cache and then drop the instruction cache. */
+     * clean the data cache and then drop the instruction cache.  A page shared
+     * by two segments is cleaned twice, which costs a few cycles and is
+     * harmless: cleaning is idempotent. */
     for (u16 i = 0; i < ehdr->e_phnum; i++) {
         const struct elf32_phdr *ph = phdr_at(image, ehdr, i);
         u32 first, va;

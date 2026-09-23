@@ -22,6 +22,7 @@
 #include <lume/sched.h>
 #include <lume/string.h>
 #include <lume/trapframe.h>
+#include <lume/syscall.h>
 #include <lume/traptest.h>
 #include <lume/types.h>
 
@@ -133,12 +134,20 @@ void do_pabt(struct trapframe *tf)
 }
 
 /*
- * Supervisor call entry.  The syscall layer is the next milestone
- * (docs/roadmap.md): there is no ELF loader and no userspace yet, so an SVC
- * cannot come from a program LumeOS loaded.  Instead of pretending to
- * dispatch, the handler reports the call exactly and kills the caller if it
- * came from user mode.  This is the hook the ARM Linux EABI dispatcher will
- * be installed on.
+ * Supervisor call entry.
+ *
+ * The dispatcher in kernel/kernel/syscall.c owns everything that happens here;
+ * this function's job is the two decisions that have to be made before it:
+ *
+ *   - the exception round-trip self test's SVC is recognised here and handled
+ *     without going near the syscall table (it is a probe, not a service), and
+ *     only a privileged caller can be it;
+ *   - anything else is dispatched by number.  An unimplemented number returns
+ *     ENOSYS and is logged once by the dispatcher; it does not kill the
+ *     process, because a program that calls an unimplemented syscall and gets
+ *     a proper error is a program we can still learn from (the old behaviour -
+ *     killing the caller with SIGSYS - turned the first missing syscall into a
+ *     dead process and no information).
  */
 void do_syscall(struct trapframe *tf)
 {
@@ -151,16 +160,7 @@ void do_syscall(struct trapframe *tf)
         return;
     }
 
-    pr_err("syscall: SVC with r7=%u (0x%x) from %s mode, pc=0x%08x",
-           tf->r[7], tf->r[7], (tf->cpsr & CPSR_MODE_MASK) == MODE_USR ? "user" : "kernel",
-           tf->pc);
-    pr_err("syscall: the LumeOS syscall layer is not implemented yet "
-           "(docs/roadmap.md)");
-
-    if ((tf->cpsr & CPSR_MODE_MASK) == MODE_USR)
-        proc_exit(proc_current(), 128 + 31 /* SIGSYS */);
-
-    panic("supervisor call from kernel mode at pc=0x%08x", tf->pc);
+    syscall_dispatch(tf);
 }
 
 void do_undef(struct trapframe *tf)
