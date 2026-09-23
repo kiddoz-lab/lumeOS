@@ -129,28 +129,39 @@ image in QEMU, but it is not how the Pi firmware boots LumeOS. Without
 
 ### The guest-error gate
 
-Every strategy is run with `-d guest_errors,unimp -D
-build/qemu-guest-errors-<strategy>.log`, and a run that leaves **any** line in
-that file fails: those two categories contain nothing else. They are QEMU's own
-opinion of the guest, and they catch a class of bug that produces a perfectly
-good-looking boot - a write to a register the hardware does not let you write,
-an offset inside a peripheral that does not decode it, an access to a device
-the model does not have.
+Every strategy runs with `-d guest_errors,unimp -D
+build/qemu-guest-errors-<strategy>.log`. Those two of QEMU's log categories
+contain nothing but the emulator's opinion of the guest, and this project treats
+them differently because they mean different things:
 
-The gate exists because of a real bug. `kernel/arch/arm/irq.c` masked all three
-interrupt-enable registers at boot and then wrote the *read-only* pending
-register "to clear latched state", which clears nothing (QEMU:
-`bcm2835_ic_write: Bad offset 0`). The kernel booted, ran 59 self tests and
-started a user program with that line in place; on real hardware it is at best a
-no-op and at worst undefined. It was found by reading QEMU's model of the
-interrupt controller next to the kernel's register writes, not by any test - so
-the test was added at the same time as the fix.
+| Log line | What it means | Effect on the run |
+| --- | --- | --- |
+| `guest_errors` - `bcm2835_ic_write: Bad offset 0`, `Invalid write at addr 0x...`, `pl011_write: Bad offset 0x...` | the kernel touched a register, an offset or an address the hardware does not provide | **fails the run**, by default |
+| `unimp` - `bcm2835_property: 0x00010001 get board model NYI` | QEMU has not implemented something the hardware has | reported and counted, never fatal |
 
-The count is printed on every passing run (`... user mode reached, 0 QEMU guest
-errors, ...`), and it is part of the CI annotation, so a waiver cannot be
-silent. `--max-guest-errors N` exists for the case where a future QEMU models a
-register differently from the hardware: the number appears in the pass line and
-in the annotation, and it is the reviewer's job to be satisfied by it.
+The split is not cosmetic. A guest error is the kernel doing something a real
+Pi would reject, and it can happen on a boot that looks perfect: nothing else in
+this project reads the log the message is written to. An `unimp` line is the
+*emulator's* incompleteness - the current one is the property mailbox's "get
+board model" tag, which `kernel/arch/arm/memdetect.c` asks for (and only uses to
+print a line) and which real firmware answers. Failing the build over that would
+mean deleting a working kernel feature to satisfy a model.
+
+Because QEMU writes the message and not the category, the two are told apart by
+the wording of the line (`nyi`, `unimplemented`, `not implemented`, `no model`);
+anything else counts as a guest error, so if a future QEMU rewords its `unimp`
+notes the gate gets noisier, never quieter. `--max-guest-errors N` exists for
+the remaining case where a guest error has been examined and accepted: the count
+appears in the pass line and in the CI annotation, so a waiver is visible to a
+reviewer rather than hidden in a script.
+
+The gate exists because of a real bug. `kernel/arch/arm/irq.c` used to mask all
+three interrupt-enable registers at boot and then write the *read-only* pending
+register "to clear latched state", which clears nothing. The kernel booted, ran
+59 self tests and started a user program with that write in place; on hardware
+it is at best a no-op and at worst undefined. It was found by reading QEMU's
+interrupt-controller model next to the kernel's register writes, not by any
+test - so the test was added in the same commit as the one-line fix.
 
 ### What the emulator run currently proves
 
@@ -171,7 +182,8 @@ A passing run establishes, from the guest's own serial output:
 * the PL011 emits the shell prompt (`lume>`) at the end of a serial log of a few
   kilobytes, so the console, the interrupt path and the receive path are all
   live;
-* QEMU's guest-error log is empty (see above);
+* QEMU reports no guest errors (see above); `unimp` notes about the
+  emulator's own gaps are reported but do not fail the run;
 * the exception history QEMU records during the run is quiet (the count below
   is for a boot of the kernel alone; a run that also starts a user program adds
   the syscalls and timer interrupts that program takes): the last exception

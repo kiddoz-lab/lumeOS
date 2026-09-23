@@ -210,7 +210,7 @@ jobs:
           # without reading a log whose download host may not be reachable.
           python3 tools/ci_annotate.py qemu-test.log \
               --title "QEMU boot test result" --notice \
-              --grep "PASS via|FAILED |checks passed|guest error|NOTE:|earlier strategies" \
+              --grep "PASS via|FAILED |checks passed|guest error|emulator gap|note: QEMU|NOTE:|earlier strategies" \
               --max-chars 2000
 
       - name: Summarise the build

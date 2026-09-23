@@ -88,16 +88,37 @@ FAILURE_PATTERNS = [
 ]
 
 # Asking QEMU what it thinks of the guest, on every run rather than only on the
-# failure path.  ``-d guest_errors,unimp`` writes exactly two kinds of line into
-# the log file: an access the guest made that the model considers a bug (a write
-# to a register the hardware does not let you write, an offset inside a
-# peripheral that does not decode it) and an access to a device QEMU does not
-# model at all.  Nothing else uses those categories, so *any* non-empty line is
-# a finding and no pattern list has to be maintained.  This gate exists because
-# of a real bug: kernel/arch/arm/irq.c used to write the read-only interrupt
-# pending register, which QEMU logs as ``bcm2835_ic_write: Bad offset 0`` on
-# every boot and which nothing else in this project noticed.
+# failure path.  Two of QEMU's log categories are useful here, and they mean
+# different things:
+#
+#   guest_errors   the model believes the *guest* did something the hardware
+#                  does not allow - a write to a read-only register, an access
+#                  to an offset a decoded peripheral does not implement, an
+#                  access to an address with no device behind it.  This is
+#                  always the kernel's bug, and it fails the run.
+#   unimp          QEMU has not implemented something the hardware has (for
+#                  example the property mailbox's "get board model" tag, which
+#                  real firmware answers and QEMU logs as NYI).  This is the
+#                  emulator's incompleteness, not the kernel's fault, so it is
+#                  reported and counted but never fails a run.
+#
+# The gate exists because of a real bug: kernel/arch/arm/irq.c used to write the
+# read-only interrupt pending register, which QEMU logs as
+# ``bcm2835_ic_write: Bad offset 0`` on every boot.  The kernel booted, passed
+# 59 self tests and started a user program with that line in place, and nothing
+# in this project was reading the log it was written to.
 GUEST_LOG_CATEGORIES = "guest_errors,unimp"
+
+# How to tell the two apart in the log file: QEMU writes the messages, not the
+# categories, and an ``unimp`` line says so in its own words.  A line that does
+# not match one of these is treated as a guest error, so wording drift in a
+# future QEMU makes the gate *noisier*, never quieter.
+QEMU_GAP_WORDING = (
+    "nyi",              # "not yet implemented" - QEMU's own shorthand
+    "unimplemented",
+    "not implemented",
+    "no model",
+)
 
 # The wording QEMU uses when it is unhappy with the guest.  The diagnosis pass
 # turns on more categories than the pass/fail runs, so it has to recognise the
@@ -107,11 +128,24 @@ GUEST_ERROR_WORDING = (
     "bad offset",
     "read-only ofs",
     "unassigned memory",
-    "unimplemented device",
-    "not implemented",
+    "invalid write",
+    "invalid read",
     "invalid channel",
     "mailbox full",
 )
+
+
+def is_qemu_gap(line: str) -> bool:
+    """True when the line is QEMU admitting a gap of its own, not a guest bug."""
+    low = line.lower()
+    return any(word in low for word in QEMU_GAP_WORDING)
+
+
+def classify_guest_log(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Split a guest-error log into (guest errors, QEMU's own gaps)."""
+    errors = [line for line in lines if not is_qemu_gap(line)]
+    gaps = [line for line in lines if is_qemu_gap(line)]
+    return errors, gaps
 
 
 def qemu_argv(qemu: str, machine: str, strategy: str, image: Path) -> list[str]:
@@ -135,7 +169,7 @@ def guest_log_path(image: Path, strategy: str) -> Path:
 
 
 def read_guest_log(path: Path) -> list[str]:
-    """The emulator's own complaints about this guest, one string per line."""
+    """Everything QEMU wrote about this guest, one string per line."""
     try:
         text = path.read_text(errors="replace")
     except OSError:
@@ -147,9 +181,8 @@ def run_once(qemu: str, machine: str, strategy: str, image: Path,
              timeout: float) -> tuple[str, int, str, list[str]]:
     """Run QEMU until the timeout (a booted LumeOS never exits) and capture output.
 
-    The guest-error log is captured as well: the run is not allowed to pass
-    while the emulator is reporting that the guest touched something it should
-    not have, even if the console output looks perfect.
+    QEMU's own log is captured as well: the run is not allowed to pass while the
+    emulator is reporting a guest error, even if the console output is perfect.
     """
     argv = qemu_argv(qemu, machine, strategy, image)
     log_path = guest_log_path(image, strategy)
@@ -219,13 +252,17 @@ def qemu_debug_pass(qemu: str, machine: str, strategy: str, image: Path,
              if line.strip()]
     report = [f"QEMU debug log: {log_path} ({len(lines)} lines)"]
 
-    hits = [line for line in lines
-            if any(word in line.lower() for word in GUEST_ERROR_WORDING)]
-    if hits:
-        report.append(f"guest-error lines ({len(hits)}), first 20:")
-        report.extend(f"  {line}" for line in hits[:20])
+    errors, gaps = classify_guest_log(
+        [line for line in lines
+         if any(word in line.lower() for word in GUEST_ERROR_WORDING)
+         or is_qemu_gap(line)])
+    if errors:
+        report.append(f"guest-error lines ({len(errors)}), first 20:")
+        report.extend(f"  guest error: {line}" for line in errors[:20])
     else:
         report.append("no guest-error lines logged")
+    for line in gaps[:5]:
+        report.append(f"  QEMU gap (not the guest's fault): {line}")
 
     resets = [line for line in lines if "reset" in line.lower()]
     if resets:
@@ -237,10 +274,10 @@ def qemu_debug_pass(qemu: str, machine: str, strategy: str, image: Path,
     return report
 
 
-def evaluate(output: str, guest_errors: list[str] | None = None,
+def evaluate(output: str, guest_log: list[str] | None = None,
              max_guest_errors: int = 0) -> tuple[bool, list[str]]:
     problems: list[str] = []
-    guest_errors = guest_errors or []
+    guest_errors, _ = classify_guest_log(guest_log or [])
 
     for marker in BOOT_MARKERS:
         if marker not in output:
@@ -261,7 +298,7 @@ def evaluate(output: str, guest_errors: list[str] | None = None,
     if len(guest_errors) > max_guest_errors:
         shown = "; ".join(repr(line) for line in guest_errors[:3])
         problems.append(
-            f"{len(guest_errors)} line(s) in the QEMU guest-error log "
+            f"{len(guest_errors)} QEMU guest error(s) "
             f"(allowed: {max_guest_errors}) - the emulator considers these "
             f"guest accesses wrong: {shown}")
 
@@ -337,9 +374,10 @@ def main(argv: list[str]) -> int:
     for strategy in STRATEGIES:
         print(f"run_qemu_test: strategy '{strategy}': "
               f"{' '.join(qemu_argv(qemu, args.machine, strategy, args.image))}")
-        how, code, output, guest_errors = run_once(
+        how, code, output, guest_log = run_once(
             qemu, args.machine, strategy, args.image, args.timeout)
-        ok, problems = evaluate(output, guest_errors, args.max_guest_errors)
+        ok, problems = evaluate(output, guest_log, args.max_guest_errors)
+        guest_errors, qemu_gaps = classify_guest_log(guest_log)
 
         if ok:
             match = SELFTEST_RE.search(output)
@@ -348,9 +386,14 @@ def main(argv: list[str]) -> int:
             guest = ("0 QEMU guest errors" if not guest_errors else
                      f"{len(guest_errors)} QEMU guest error(s), "
                      f"allowed {args.max_guest_errors}")
+            if qemu_gaps:
+                guest += (f", {len(qemu_gaps)} emulator gap(s) noted "
+                          f"({qemu_gaps[0]!r})")
             print(f"run_qemu_test: PASS via '{strategy}' "
                   f"(kernel self tests {match.group(1)}/{match.group(2)}, "
                   f"{user}, {guest}, booting in QEMU's {args.machine} model)")
+            for line in qemu_gaps:
+                print(f"run_qemu_test: note: QEMU does not implement this: {line}")
             print("run_qemu_test: --- kernel console output ---")
             print(output.rstrip())
             print("run_qemu_test: --- end of console output ---")
@@ -371,11 +414,13 @@ def main(argv: list[str]) -> int:
         print(f"run_qemu_test: strategy '{strategy}' failed: {reason}")
         for problem in problems:
             print(f"run_qemu_test:   - {problem}")
-        if guest_errors:
+        if guest_errors or qemu_gaps:
             print(f"run_qemu_test:   guest-error log "
                   f"{guest_log_path(args.image, strategy)}:")
             for line in guest_errors[:10]:
-                print(f"run_qemu_test:     | {line}")
+                print(f"run_qemu_test:     | guest error: {line}")
+            for line in qemu_gaps[:10]:
+                print(f"run_qemu_test:     | QEMU gap: {line}")
         failures.append(f"{strategy}: {reason}; " + "; ".join(problems))
         per_strategy.append(f"{strategy}: FAILED ({reason}; {len(problems)} problem(s))")
         if output.strip():
