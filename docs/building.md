@@ -82,6 +82,7 @@ source step, no binary blob in the tree, and no configuration script.
 | `CC` | `$(CROSS_COMPILE)gcc` | compiler; set to `tools/zig-cc.sh` for the zig path |
 | `PYTHON` | `python3` | interpreter for the tools in `tools/` |
 | `CHECK_ISA_FLAGS` | `--require-attributes` | arguments for the ISA gate; CI uses `--require-attributes --require-capstone` |
+| `CHECK_ABI_FLAGS` | `--require-capstone` | arguments for the EABI gate; the same rule, so a machine without capstone fails the build instead of silently skipping the disassembly half |
 | `LUME_FIRMWARE_DIR` | `.firmware` | where the Raspberry Pi firmware lives |
 | `BUILD` | `build` | output directory |
 
@@ -95,7 +96,7 @@ make kernel
 make CC=tools/zig-cc.sh PYTHON=.venv/bin/python kernel
 
 # be strict about the ISA gate locally, exactly like CI
-make kernel CHECK_ISA_FLAGS="--require-attributes --require-capstone"
+make kernel CHECK_ISA_FLAGS="--require-attributes --require-capstone" CHECK_ABI_FLAGS=--require-capstone
 ```
 
 ---
@@ -326,7 +327,8 @@ at 115200 8N1, with the adapter's TX going to the Pi's RX.
 
 1. installs `gcc-arm-none-eabi`, `binutils-arm-none-eabi`, `qemu-system-arm`
    and `python3-capstone`;
-2. `make kernel` with `CHECK_ISA_FLAGS=--require-attributes --require-capstone`;
+2. `make kernel` with `CHECK_ISA_FLAGS=--require-attributes --require-capstone` and
+   `CHECK_ABI_FLAGS=--require-capstone`;
    on failure, the tail of the log is republished as an annotation (the log
    download host is not reachable from every environment, annotations are);
 3. re-runs `tools/elf2bin.py` to a second file, `cmp`s it against

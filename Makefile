@@ -13,6 +13,10 @@ PYTHON        ?= python3
 # CHECK_ISA_FLAGS="--require-attributes --require-capstone" so that a missing
 # capstone can never turn the check into a silent pass.
 CHECK_ISA_FLAGS ?= --require-attributes
+# The EABI gate is the same kind of check and gets the same treatment: CI sets
+# both --require flags so a machine without capstone fails loudly instead of
+# silently skipping the disassembly half.
+CHECK_ABI_FLAGS ?= --require-capstone
 
 BUILD         := build
 KERNEL        := $(BUILD)/lumeos.elf

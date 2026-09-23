@@ -29,6 +29,7 @@ jobs:
       # CI is strict on purpose: the ISA gate must actually run (no silent
       # pass when capstone is missing) and QEMU must be present.
       CHECK_ISA_FLAGS: --require-attributes --require-capstone
+      CHECK_ABI_FLAGS: --require-capstone
       LUME_FIRMWARE_DIR: .firmware
 
     steps:
