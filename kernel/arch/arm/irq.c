@@ -67,7 +67,12 @@ void irq_init(void)
     IRQ_REG(IRQ_DISABLE_1) = 0xFFFFFFFFu;
     IRQ_REG(IRQ_DISABLE_2) = 0xFFFFFFFFu;
     IRQ_REG(IRQ_DISABLE_BASIC) = 0xFFFFFFFFu;
-    IRQ_REG(IRQ_BASIC_PENDING) = 0; /* pending bits are cleared at the source */
+
+    /* There is deliberately no write to IRQ_BASIC_PENDING here.  The register
+     * is read-only - the pending bits are cleared at the source (the UART by
+     * writing ICR, the system timer by writing CTRL_STATUS) - and writing it
+     * is a guest error on QEMU's model, which tests/qemu/run_qemu_test.py now
+     * fails the build over.  It was here, and it was wrong. */
 }
 
 int irq_register(u32 irq, const char *name, void (*handler)(u32, void *), void *arg)

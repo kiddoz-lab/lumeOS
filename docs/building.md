@@ -68,7 +68,7 @@ Run `make help` for the summary; this is the detail.
 | `make firmware` | `.firmware/` | downloads the pinned Raspberry Pi boot firmware |
 | `make test` | – | alias for `test-host` |
 | `make test-host` | – | runs the host unit tests (`tests/host`) |
-| `make test-qemu` | – | boots `build/kernel.img` under QEMU and checks for the boot markers |
+| `make test-qemu` | – | boots `build/kernel.img` under QEMU, checks the boot and userspace markers and fails on any QEMU guest error |
 | `make clean` | – | removes `build/` |
 | `make distclean` | – | `clean` plus `.firmware/` |
 
@@ -355,10 +355,13 @@ at 115200 8N1, with the adapter's TX going to the Pi's RX.
 7. uploads `lumeos-sd-image` and `lumeos-kernel` artifacts (the kernel artifact
    includes `build/userspace/init.elf`);
 8. runs the QEMU boot test as a real gate - losing a boot marker, a self test,
-   the shell prompt or the user program's own output fails the build. On failure the job also runs
+   the shell prompt, the user program's own output or a clean QEMU guest-error
+   log fails the build. On failure the job also runs
    `tests/qemu/diagnose_boot.py` and publishes the diagnosis as an annotation
    and a log artifact, so a boot regression arrives with its own trace. See
-   [testing.md](testing.md) for what this proves and what only hardware can.
+   [testing.md](testing.md) for what this proves and what only hardware can - and
+   for the guest-error gate, which is there because a write to a read-only
+   interrupt register once booted the kernel perfectly and was still wrong.
 
 A build of the SD image is therefore a CI artifact you can download and flash
 without building anything locally. It is **not** evidence that the kernel boots:

@@ -87,6 +87,32 @@ FAILURE_PATTERNS = [
     "Oops",
 ]
 
+# Asking QEMU what it thinks of the guest, on every run rather than only on the
+# failure path.  ``-d guest_errors,unimp`` writes exactly two kinds of line into
+# the log file: an access the guest made that the model considers a bug (a write
+# to a register the hardware does not let you write, an offset inside a
+# peripheral that does not decode it) and an access to a device QEMU does not
+# model at all.  Nothing else uses those categories, so *any* non-empty line is
+# a finding and no pattern list has to be maintained.  This gate exists because
+# of a real bug: kernel/arch/arm/irq.c used to write the read-only interrupt
+# pending register, which QEMU logs as ``bcm2835_ic_write: Bad offset 0`` on
+# every boot and which nothing else in this project noticed.
+GUEST_LOG_CATEGORIES = "guest_errors,unimp"
+
+# The wording QEMU uses when it is unhappy with the guest.  The diagnosis pass
+# turns on more categories than the pass/fail runs, so it has to recognise the
+# lines by their text - note that "guest error" is *not* one of the strings
+# QEMU prints, which is why the filter this replaces never matched anything.
+GUEST_ERROR_WORDING = (
+    "bad offset",
+    "read-only ofs",
+    "unassigned memory",
+    "unimplemented device",
+    "not implemented",
+    "invalid channel",
+    "mailbox full",
+)
+
 
 def qemu_argv(qemu: str, machine: str, strategy: str, image: Path) -> list[str]:
     base = [qemu, "-M", machine, "-display", "none", "-monitor", "none",
@@ -103,21 +129,43 @@ def qemu_argv(qemu: str, machine: str, strategy: str, image: Path) -> list[str]:
 STRATEGIES = ("bios", "loader", "kernel")
 
 
+def guest_log_path(image: Path, strategy: str) -> Path:
+    """Where the guest-error log for one strategy lives (next to the image)."""
+    return image.parent / f"qemu-guest-errors-{strategy}.log"
+
+
+def read_guest_log(path: Path) -> list[str]:
+    """The emulator's own complaints about this guest, one string per line."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
 def run_once(qemu: str, machine: str, strategy: str, image: Path,
-             timeout: float) -> tuple[str, int, str]:
-    """Run QEMU until the timeout (a booted LumeOS never exits) and capture output."""
+             timeout: float) -> tuple[str, int, str, list[str]]:
+    """Run QEMU until the timeout (a booted LumeOS never exits) and capture output.
+
+    The guest-error log is captured as well: the run is not allowed to pass
+    while the emulator is reporting that the guest touched something it should
+    not have, even if the console output looks perfect.
+    """
     argv = qemu_argv(qemu, machine, strategy, image)
+    log_path = guest_log_path(image, strategy)
+    log_path.unlink(missing_ok=True)   # a stale log must not pass as evidence
+    argv = argv + ["-d", GUEST_LOG_CATEGORIES, "-D", str(log_path)]
     try:
         proc = subprocess.run(argv, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               timeout=timeout, text=True, errors="replace")
-        return "exited", proc.returncode, proc.stdout
+        return "exited", proc.returncode, proc.stdout, read_guest_log(log_path)
     except subprocess.TimeoutExpired as exc:
         output = exc.stdout or ""
         if isinstance(output, bytes):
             output = output.decode("utf-8", "replace")
         # Timeout is the expected outcome for an OS that never powers off.
-        return "timeout", 0, output
+        return "timeout", 0, output, read_guest_log(log_path)
 
 
 
@@ -172,13 +220,12 @@ def qemu_debug_pass(qemu: str, machine: str, strategy: str, image: Path,
     report = [f"QEMU debug log: {log_path} ({len(lines)} lines)"]
 
     hits = [line for line in lines
-            if ("unimp" in line.lower() or "unassigned" in line.lower()
-                or "invalid" in line.lower() or "guest error" in line.lower())]
+            if any(word in line.lower() for word in GUEST_ERROR_WORDING)]
     if hits:
-        report.append(f"unimplemented/unassigned accesses ({len(hits)} lines), first 20:")
+        report.append(f"guest-error lines ({len(hits)}), first 20:")
         report.extend(f"  {line}" for line in hits[:20])
     else:
-        report.append("no unimplemented/unassigned accesses logged")
+        report.append("no guest-error lines logged")
 
     resets = [line for line in lines if "reset" in line.lower()]
     if resets:
@@ -190,8 +237,10 @@ def qemu_debug_pass(qemu: str, machine: str, strategy: str, image: Path,
     return report
 
 
-def evaluate(output: str) -> tuple[bool, list[str]]:
+def evaluate(output: str, guest_errors: list[str] | None = None,
+             max_guest_errors: int = 0) -> tuple[bool, list[str]]:
     problems: list[str] = []
+    guest_errors = guest_errors or []
 
     for marker in BOOT_MARKERS:
         if marker not in output:
@@ -208,6 +257,13 @@ def evaluate(output: str) -> tuple[bool, list[str]]:
     for pattern in FAILURE_PATTERNS:
         if pattern in output:
             problems.append(f"output contains failure pattern: {pattern!r}")
+
+    if len(guest_errors) > max_guest_errors:
+        shown = "; ".join(repr(line) for line in guest_errors[:3])
+        problems.append(
+            f"{len(guest_errors)} line(s) in the QEMU guest-error log "
+            f"(allowed: {max_guest_errors}) - the emulator considers these "
+            f"guest accesses wrong: {shown}")
 
     match = SELFTEST_RE.search(output)
     if not match:
@@ -234,6 +290,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--machine", default="raspi0")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="seconds to let the kernel run before checking output")
+    parser.add_argument("--max-guest-errors", type=int, default=0,
+                        help="how many QEMU guest-error lines to tolerate "
+                             "(default 0: the emulator's complaints about the "
+                             "guest's own accesses fail the run)")
     parser.add_argument("--no-diagnostics", action="store_true",
                         help="skip the extra QEMU runs that explain a failure")
     parser.add_argument("--diagnose-timeout", type=float, default=10.0,
@@ -277,17 +337,20 @@ def main(argv: list[str]) -> int:
     for strategy in STRATEGIES:
         print(f"run_qemu_test: strategy '{strategy}': "
               f"{' '.join(qemu_argv(qemu, args.machine, strategy, args.image))}")
-        how, code, output = run_once(qemu, args.machine, strategy, args.image,
-                                     args.timeout)
-        ok, problems = evaluate(output)
+        how, code, output, guest_errors = run_once(
+            qemu, args.machine, strategy, args.image, args.timeout)
+        ok, problems = evaluate(output, guest_errors, args.max_guest_errors)
 
         if ok:
             match = SELFTEST_RE.search(output)
             user = "user mode reached" if all(m in output for m in USER_MARKERS) \
                 else "USER MODE MARKERS MISSING"
+            guest = ("0 QEMU guest errors" if not guest_errors else
+                     f"{len(guest_errors)} QEMU guest error(s), "
+                     f"allowed {args.max_guest_errors}")
             print(f"run_qemu_test: PASS via '{strategy}' "
                   f"(kernel self tests {match.group(1)}/{match.group(2)}, "
-                  f"{user}, booting in QEMU's {args.machine} model)")
+                  f"{user}, {guest}, booting in QEMU's {args.machine} model)")
             print("run_qemu_test: --- kernel console output ---")
             print(output.rstrip())
             print("run_qemu_test: --- end of console output ---")
@@ -308,6 +371,11 @@ def main(argv: list[str]) -> int:
         print(f"run_qemu_test: strategy '{strategy}' failed: {reason}")
         for problem in problems:
             print(f"run_qemu_test:   - {problem}")
+        if guest_errors:
+            print(f"run_qemu_test:   guest-error log "
+                  f"{guest_log_path(args.image, strategy)}:")
+            for line in guest_errors[:10]:
+                print(f"run_qemu_test:     | {line}")
         failures.append(f"{strategy}: {reason}; " + "; ".join(problems))
         per_strategy.append(f"{strategy}: FAILED ({reason}; {len(problems)} problem(s))")
         if output.strip():

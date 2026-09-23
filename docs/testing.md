@@ -127,6 +127,31 @@ image in QEMU, but it is not how the Pi firmware boots LumeOS. Without
 `--required` (or `$CI`), the test reports SKIP when QEMU is missing, so
 `make test-qemu` on a machine without QEMU does not fail the build.
 
+### The guest-error gate
+
+Every strategy is run with `-d guest_errors,unimp -D
+build/qemu-guest-errors-<strategy>.log`, and a run that leaves **any** line in
+that file fails: those two categories contain nothing else. They are QEMU's own
+opinion of the guest, and they catch a class of bug that produces a perfectly
+good-looking boot - a write to a register the hardware does not let you write,
+an offset inside a peripheral that does not decode it, an access to a device
+the model does not have.
+
+The gate exists because of a real bug. `kernel/arch/arm/irq.c` masked all three
+interrupt-enable registers at boot and then wrote the *read-only* pending
+register "to clear latched state", which clears nothing (QEMU:
+`bcm2835_ic_write: Bad offset 0`). The kernel booted, ran 59 self tests and
+started a user program with that line in place; on real hardware it is at best a
+no-op and at worst undefined. It was found by reading QEMU's model of the
+interrupt controller next to the kernel's register writes, not by any test - so
+the test was added at the same time as the fix.
+
+The count is printed on every passing run (`... user mode reached, 0 QEMU guest
+errors, ...`), and it is part of the CI annotation, so a waiver cannot be
+silent. `--max-guest-errors N` exists for the case where a future QEMU models a
+register differently from the hardware: the number appears in the pass line and
+in the annotation, and it is the reviewer's job to be satisfied by it.
+
 ### What the emulator run currently proves
 
 At the current head the `bios` and `loader` strategies boot; the `kernel`
@@ -146,6 +171,7 @@ A passing run establishes, from the guest's own serial output:
 * the PL011 emits the shell prompt (`lume>`) at the end of a serial log of a few
   kilobytes, so the console, the interrupt path and the receive path are all
   live;
+* QEMU's guest-error log is empty (see above);
 * the exception history QEMU records during the run is quiet (the count below
   is for a boot of the kernel alone; a run that also starts a user program adds
   the syscalls and timer interrupts that program takes): the last exception
