@@ -168,22 +168,34 @@ LumeOS 0.1.0 (armv6kz) -- an operating system for the Raspberry Pi Zero W
 kernel: entered at virtual 0xc00081xx, loaded at physical 0x00008000, image ends at 0x0002b000
 memory: 448 MiB RAM at 0x00000000, ... KiB free after reservations
 selftest: running kernel self tests
-selftest: 44/44 checks passed
+selftest: N/N checks passed
 LumeOS: boot complete, ... KiB free, ... timer ticks
+init: loading the embedded NNNNN-byte init image (entry 0x00010000, sha256 ...)
+init: entering user mode at 0x00010000 on stack 0xbdffffxx (1 segments, 1 pages)
+init: hello from user mode
+init: pid 1, argc 1
+init: argv[0] is "/bin/init"
+init: this line went to file descriptor 2
+init: exiting with status 0
+init: pid 1 exited with status 0 (exit code 0)
 main: entering the idle loop
 ```
 
 (The exact wording comes from `kernel/kernel/main.c` and
 `kernel/kernel/selftest.c`; `LumeOS: boot complete` and
 `main: entering the idle loop` are the markers the emulator test greps for, so
-they are stable by construction. The check count is 44 today and will grow with
-the kernel - and it is part of what the emulator test asserts, so the number in
-a real boot log can be compared directly against what CI saw.
+they are stable by construction, and so are the `init:` lines - the emulator
+test requires every one of them. The check count grows with the kernel (59 at
+the last run that was read back) and it is asserted too, so the number in a real
+boot log can be compared directly against what CI saw.
 
 The predictions above are now backed by emulator evidence rather than only by
-reading the code: the boot reaches all four markers, `44/44` self tests pass and
-the shell prompt appears under QEMU (see
-[testing.md](testing.md#what-the-emulator-run-currently-proves)). What is still
+reading the code: the boot reaches all four markers, `59/59` self tests pass, the
+user program's own output appears and the shell prompt follows it under QEMU (see
+[testing.md](testing.md#what-the-emulator-run-currently-proves)). The lines
+between `selftest:` and `main: entering the idle loop` are the ones that say the
+hand-off worked: if they are present on your board, LumeOS has run a 32-bit ARM
+Linux ELF in user mode on real hardware. What is still
 unproven on this page is anything that depends on the firmware, the card, the
 wiring, the clocks or the board. If you are the first person to run this on
 hardware, that is the open question, not the kernel's internal logic.

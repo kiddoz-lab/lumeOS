@@ -6,9 +6,9 @@ Statuses are kept strict - *works* means a test that actually ran passed, not
 
 | | |
 | --- | --- |
-| Today | milestone 1 in the emulator: the kernel boots to its markers, passes `44/44` self tests and reaches the shell prompt under QEMU (CI-enforced) |
-| Next | validate that same image on a real Pi Zero W, then start userspace |
-| Then | ELF loader, syscalls, `init`, a shell - and the first real ARM Linux binary |
+| Today | a static ARM ELF loads and runs in user mode: `init` prints from user mode, makes syscalls and exits with a status the kernel reaps (CI-enforced, `59/59` self tests) |
+| Next | validate the same image on a real Pi Zero W, then give userspace a filesystem to load programs from |
+| Then | the syscall surface a real libc needs - `auxv`, `mmap2`, `openat`, `stat64`, signals, `clone`, `futex` - and then a real ARM Linux binary |
 
 Legend: ✅ works and is covered by a test that ran - and unless a row says
 otherwise that test is the *emulator*, not a Raspberry Pi · 🟡 written, not yet
@@ -43,7 +43,7 @@ ambiguous.
 | Interrupt controller, IRQ dispatch | ✅ self-checking handlers and unclaimed-interrupt reporting; the storm is gone and the last exception of a run is an ordinary IRQ |
 | Preemptive scheduler, threads | 🟡 context switch, wait queues and the idle loop all execute; starvation and fairness are unmeasured |
 | Kernel self tests (44 checks) | ✅ `44/44` asserted by the emulator test on every CI run |
-| Kernel shell (`help`, `mem`, `ps`, `time`, `irq`, `echo`, `reboot`, `halt`, `version`) | 🟡 the prompt appears in QEMU; no command has been typed into it yet |
+| Kernel shell (`help`, `mem`, `ps`, `time`, `irq`, `echo`, `reboot`, `halt`, `version`) | 🟡 the prompt appears in QEMU (and now *after* init has run and exited); no command has been typed into it yet |
 
 ### Fixed since this milestone started
 
@@ -100,6 +100,32 @@ which is itself a limitation: they are all paths the QEMU boot does not reach.
   settings recorded in [testing.md](testing.md). This is the part of milestone 1
   that is still open, and it cannot be closed by anything in this repository -
   only by someone with the board.
+
+## Milestone 3 - userspace: the first ARM Linux binary 🟡 (started)
+
+The first half is done and asserted by CI: the kernel loads a static ARM ELF,
+enters user mode, dispatches syscalls and reaps the process.
+
+| Item | State |
+| --- | --- |
+| ELF32 `EM_ARM` `ET_EXEC` loader | ✅ maps `PT_LOAD` segments with their real permissions, zeroes `bss`, handles pages shared by two segments, cleans/invalidates caches; 7 self tests |
+| Initial stack (`argc`/`argv`/`envp`) | ✅ built through the *new* address space (see `copy_to_user_as`); no `auxv` yet |
+| Syscall entry and dispatch | ✅ `svc #0`, `r7`, `r0-r5`, Linux error convention, `-ENOSYS` + one log line per unimplemented number |
+| `write`, `read`, `exit`, `exit_group`, `getpid`, `getuid`/`euid`, `getgid`/`egid`, `brk`, `uname`, `wait4`, `set_tls` | ✅ |
+| A program that runs and prints through `write(2)` | ✅ `userspace/init`, built by `make userspace`, embedded by `tools/embed_user.py`, asserted marker by marker in QEMU |
+| Process reaping and thread-slot reuse | ✅ a kernel watchdog waits with `wait4` semantics and reports the status |
+| `auxv` (with honest `AT_HWCAP`) | ⛔ next, and the prerequisite for any glibc/musl binary |
+| `mmap2`, `mprotect`, `munmap` | ⛔ |
+| Filesystem + `openat`/`stat64`/`getdents64` | ⛔ the VFS is interfaces only; this is what turns the embedded blob into `/bin/init` on a card |
+| Signals, `clone`, `futex`, pipes, `clock_gettime` | ⛔ |
+
+### Definition of done for the first half of milestone 3
+
+* ✅ `userspace/init` runs in ARM user mode and its own output appears in the
+  emulator's serial log;
+* ✅ the same output is a **required** marker in the QEMU test, so breaking user
+  mode breaks the build;
+* ⛔ that run happens on a real Pi Zero W (milestone 2's open item).
 
 ## Milestone 2 - a real hardware boot ⛔
 
@@ -205,19 +231,44 @@ Three rules, enforced by convention and by CI:
 
 In the order the next commits should happen:
 
-1. **Make the trap frame testable.** Write the self test that raises an
-   exception, checks that the handler sees a correct frame and that the
-   registers come back unchanged - then fix what it finds in `vectors.S`
-   (`__restore_regs`, the r8/r9 save order). This is the last thing standing
-   between the current kernel and a safe first userspace entry, and it is
-   testable in the emulator, so it costs nothing to do properly.
-2. **Make `make test-qemu` runnable locally and keep the diagnosis alive.** The
-   diagnosis step only fires on failure today; if it is cheap enough, run it
-   behind `--diagnose` in CI on every Nth run so the "quiet run" claim keeps
-   being measured instead of assumed.
-3. **Then userspace** (milestone 3): address spaces, ELF loader, syscall table,
-   `write`/`exit`/`brk`/`mmap2`, and the `userspace` target that turns a static
-   test program into something the kernel actually jumps into.
-4. **Then a hardware boot** (milestone 2) - which may have to come *before* the
-   userspace work if a board becomes available, because a bug found on hardware
-   changes what the userspace foundation has to look like.
+1. **`auxv`, then a real libc.** The next thing that moves the compatibility goal
+   is the auxiliary vector on the initial stack - `AT_PAGESZ`, `AT_ENTRY`,
+   `AT_PHDR`, `AT_RANDOM` and an honest `AT_HWCAP` (ARMv6KZ: no VFP, no NEON, no
+   Thumb-2) - plus `mmap2`, `mprotect`, `munmap` and `clock_gettime`. That is
+   what a static musl `hello world` needs before anything else on this list can
+   be tested against a real binary instead of against our own program.
+2. **A filesystem, so the next program is not embedded in the kernel.** A
+   read-only FAT16 reader on the SD card plus path lookup in the VFS is the
+   smallest thing that turns `init` from a blob in `.rodata` into `/bin/init`,
+   and it is what makes `openat`/`stat64`/`getdents64` implementable at all.
+3. **Extend the exception probe to the IRQ path.** The same trick as
+   `trapprobe.S` works for an interrupt: arm a one-shot timer compare, spin with
+   a known register pattern, and check the frame the handler saw and the
+   registers that came back. That covers the nested case (an IRQ arriving while
+   the kernel is inside `__restore_regs` or at a wait point), which nothing
+   tests today.
+4. **Make `make test-qemu` runnable locally, and keep the diagnosis alive.** The
+   diagnosis step only fires on failure today; running it behind `--diagnose`
+   every Nth CI run keeps the "quiet run" claim measured instead of assumed.
+5. **A hardware boot** (milestone 2). It can jump the queue at any point: a bug
+   found on a board changes what everything above has to look like.
+
+---
+
+## How this file is kept honest
+
+Three rules, applied whenever a milestone row changes:
+
+1. **A tick means a test that ran.** "✅" never means "the code looks right" - it
+   means a named CI run or a documented local command produced the result, and
+   where it matters the run or commit is named in the row itself.
+2. **Every feature appears with what it does not cover.** `brk` says it refuses
+   to grow into the mmap region; the ELF loader says it refuses PIE by name; the
+   console device says it has no terminal ioctls. A row without a limitation is
+   a row that has not been examined.
+3. **Nothing is marked done because it is nearly done.** The trap-frame probe
+   spent exactly one commit in this file described as "written, emulator run
+   pending", with the reason (a GitHub credential problem on the machine that
+   wrote it) - and the next run turned it into a ✅ with the commit that showed
+   it. That is the pattern: state what is unverified and why, then close it with
+   evidence.

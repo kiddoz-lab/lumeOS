@@ -99,17 +99,23 @@ jobs:
       - name: Build the first user program (build/userspace/init.elf)
         run: |
           set -o pipefail
-          if ! make userspace 2>&1 | tee userspace.log; then
+          # Everything goes through the log, including the inspection below:
+          # the annotation that records this step should say what the image is,
+          # not just that a command succeeded.
+          if ! {
+                make userspace
+                file build/userspace/init.elf
+                arm-none-eabi-readelf -h -l build/userspace/init.elf
+                arm-none-eabi-size build/userspace/init.elf
+              } 2>&1 | tee userspace.log; then
             python3 tools/ci_annotate.py userspace.log --title "make userspace"
             exit 1
           fi
-          file build/userspace/init.elf
-          arm-none-eabi-readelf -h -l build/userspace/init.elf | head -30
-          arm-none-eabi-size build/userspace/init.elf || true
           # Record what the kernel will load: the QEMU test asserts that the
-          # program's own output appears, so these numbers belong in the run.
+          # program's own output appears, so its entry point, its segments and
+          # its size belong in the run.
           python3 tools/ci_annotate.py userspace.log --notice \
-              --title "userspace init image" --grep "built from" --max-chars 400
+              --title "userspace init image" --grep "init.elf|LOAD " --max-chars 1400
 
       - name: Host unit tests (printf, string library, build tools)
         run: |
@@ -204,7 +210,8 @@ jobs:
           # without reading a log whose download host may not be reachable.
           python3 tools/ci_annotate.py qemu-test.log \
               --title "QEMU boot test result" --notice \
-              --grep "PASS via|checks passed|NOTE:" --max-chars 1200
+              --grep "PASS via|FAILED |checks passed|NOTE:|earlier strategies" \
+              --max-chars 2000
 
       - name: Summarise the build
         if: always()

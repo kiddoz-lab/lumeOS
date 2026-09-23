@@ -135,15 +135,20 @@ A passing run establishes, from the guest's own serial output:
 
 * all four boot markers print, in order, ending with
   `main: entering the idle loop`;
-* the kernel prints `selftest: 44/44 checks passed` - the physical memory
-  manager, the kernel heap, MMU mapping and translation, the system timer, the
-  string library and the EABI division helpers all behave as their tests
-  require. The emulator asserts `N == M` *and* that at least 40 checks ran, so
-  the summary line cannot quietly become vacuous;
+* the kernel prints `selftest: N/N checks passed` - the physical memory manager,
+  the kernel heap, MMU mapping and translation, the system timer, the string
+  library, the EABI division helpers, the exception round trip and the ELF
+  loader's validation all behave as their tests require. The emulator asserts
+  `N == M` *and* that at least 55 checks ran, so the summary line cannot quietly
+  become vacuous. Commit `ed52306` reported `59/59`; the count grows with the
+  kernel, and this document only ever states the number together with the commit
+  that showed it;
 * the PL011 emits the shell prompt (`lume>`) at the end of a serial log of a few
   kilobytes, so the console, the interrupt path and the receive path are all
   live;
-* the exception history QEMU records during the run is quiet: the last exception
+* the exception history QEMU records during the run is quiet (the count below
+  is for a boot of the kernel alone; a run that also starts a user program adds
+  the syscalls and timer interrupts that program takes): the last exception
   is an ordinary IRQ, there is no prefetch abort, and no `IFAR`/`IFSR` line
   appears at all. Earlier runs ended in a prefetch abort with `IFSR 0x5`
   (section translation fault) at `IFAR 0xffff000c` - a fault inside the
@@ -192,6 +197,27 @@ The QEMU step is blocking in CI, so a regression that loses a marker, a self
 test or the prompt fails the build rather than being reported as a note. The
 step deliberately has no `continue-on-error`; when a real bug does appear, the
 diagnosis step below supplies the trace.
+
+### Observed versus claimed
+
+Statements about this project are of two kinds, and the difference is the whole
+point of this document:
+
+* **observed** - a CI run at a named commit reports it. That is what citations
+  like "`59/59` at `ed52306`" mean, and every ✅ in
+  [roadmap.md](roadmap.md) is meant to be one of these;
+* **pending** - the code and its local gates exist, and the emulator run that
+  would confirm it has not been read back yet.
+
+When something is pending, it is written down as pending, with the reason. The
+exception round-trip probe spent exactly one commit that way ("written,
+`arch/arm/trapprobe.S`; the emulator run that confirms it is pending - pushing
+was blocked by a credential problem on the machine that wrote it"), and the next
+run turned it into an observed result with the commit that showed it. The
+alternative - letting the document quietly promote "the code exists" into "it
+works" - is the one failure mode this document set exists to prevent.
+
+Nothing is pending at the current head.
 
 ### `tests/qemu/diagnose_boot.py`
 

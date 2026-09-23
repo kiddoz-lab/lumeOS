@@ -62,7 +62,8 @@ Run `make help` for the summary; this is the detail.
 | Target | Produces | What it does |
 | --- | --- | --- |
 | `make` (or `make all`) | `build/kernel.img`, `build/lumeos-sd.img` | `kernel` followed by `image` |
-| `make kernel` | `build/lumeos.elf`, `build/kernel.img` | compiles every source, links with `kernel/ld/lumeos.ld`, runs the two static gates, then converts the ELF to the flat image |
+| `make kernel` | `build/lumeos.elf`, `build/kernel.img` | builds the user program first (the image embeds it), compiles every kernel source, links with `kernel/ld/lumeos.ld`, runs the two static gates on the kernel, then converts the ELF to the flat image |
+| `make userspace` | `build/userspace/init.elf` | builds the first user program: a static, freestanding ARMv6 ELF with its own `crt0`, and runs the same ISA and EABI gates on it (`--allow-none` for the EABI one, see §4) |
 | `make image` | `build/lumeos-sd.img` | fills a 64 MiB MBR + FAT16 volume with the firmware, `config.txt` and `kernel.img`, then verifies it |
 | `make firmware` | `.firmware/` | downloads the pinned Raspberry Pi boot firmware |
 | `make test` | – | alias for `test-host` |
@@ -187,6 +188,17 @@ Both classes of bug are invisible to the compiler and the linker. The second
 one actually happened here: it panicked the kernel with "64-bit division by
 zero" before the serial console existed. See
 [architecture.md](architecture.md#the-two-arm-calling-conventions-and-why-the-eabi-helpers-are-assembly).
+
+### The same gates on the user program
+
+`make userspace` runs both checkers on `build/userspace/init.elf`, because a
+user program can emit an ARMv7-only instruction just as easily as the kernel
+can - and there it would fault in *user* mode, where the failure is attributed
+to the program rather than to the build. The EABI checker is invoked with
+`--allow-none`: a program linked with `-nostdlib` that never calls a division
+helper legitimately defines none of the six, and the linker is what guarantees
+closure there. If such a program ever *does* define one, its layout is checked
+like the kernel's.
 
 ---
 
@@ -334,12 +346,16 @@ at 115200 8N1, with the adapter's TX going to the Pi's RX.
 3. re-runs `tools/elf2bin.py` to a second file, `cmp`s it against
    `build/kernel.img`, prints the physical load range, and runs `file` and
    `arm-none-eabi-size` on the ELF;
-4. `make test-host`;
-5. `make firmware` and `make image`, then `tools/verify_image.py`, which also
+4. builds the user program on its own (`make userspace`), prints its ELF headers
+   and program headers, and publishes what the kernel will load as an
+   annotation - entry point, segments and size;
+5. `make test-host`;
+6. `make firmware` and `make image`, then `tools/verify_image.py`, which also
    publishes the image size, file list and SHA-256 as an annotation;
-6. uploads `lumeos-sd-image` and `lumeos-kernel` artifacts;
-7. runs the QEMU boot test as a real gate - losing a boot marker, a self test
-   or the shell prompt fails the build. On failure the job also runs
+7. uploads `lumeos-sd-image` and `lumeos-kernel` artifacts (the kernel artifact
+   includes `build/userspace/init.elf`);
+8. runs the QEMU boot test as a real gate - losing a boot marker, a self test,
+   the shell prompt or the user program's own output fails the build. On failure the job also runs
    `tests/qemu/diagnose_boot.py` and publishes the diagnosis as an annotation
    and a log artifact, so a boot regression arrives with its own trace. See
    [testing.md](testing.md) for what this proves and what only hardware can.

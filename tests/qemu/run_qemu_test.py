@@ -265,6 +265,7 @@ def main(argv: list[str]) -> int:
           f"({args.image.stat().st_size} bytes), machine {args.machine}")
 
     failures: list[str] = []
+    per_strategy: list[str] = []
     # (strategy, last few console lines) - reprinted in the final report, which
     # is the last thing this program writes to stdout.  That matters because CI
     # lifts the tail of this log into an annotation and stdout is block
@@ -290,6 +291,10 @@ def main(argv: list[str]) -> int:
             print("run_qemu_test: --- kernel console output ---")
             print(output.rstrip())
             print("run_qemu_test: --- end of console output ---")
+            if per_strategy:
+                print("run_qemu_test: earlier strategies:")
+                for line in per_strategy:
+                    print(f"run_qemu_test:   {line}")
             print("run_qemu_test: NOTE: emulator result only; a real Raspberry Pi "
                   "Zero W boot is still unverified (see docs/testing.md).")
             return 0
@@ -304,6 +309,7 @@ def main(argv: list[str]) -> int:
         for problem in problems:
             print(f"run_qemu_test:   - {problem}")
         failures.append(f"{strategy}: {reason}; " + "; ".join(problems))
+        per_strategy.append(f"{strategy}: FAILED ({reason}; {len(problems)} problem(s))")
         if output.strip():
             console_tails.append((strategy, output.strip().splitlines()[-4:]))
             for line in output.splitlines():

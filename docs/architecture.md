@@ -206,15 +206,77 @@ tree - most importantly the syscall entry point: the ARM Linux syscall ABI uses
 registers and caller-provided pointers, never register-returned structs, which
 is fortunately the same shape.
 
+## System calls and user mode
+
+The path a program takes into the kernel, and the reason each step is where it
+is:
+
+```
+ user program: mov r7, #4 ; svc #0
+        |
+        v
+ vector_svc (vectors.S)      builds the trap frame on the SVC stack *in place*
+        |                    (see the SVC leak note below), records the mode it
+        |                    trapped from, masks IRQs/FIQs, calls the handler
+        v
+ do_syscall (exception.c)    recognises the self-test probe's SVC, then calls
+        |                    syscall_dispatch() with the frame
+        v
+ syscall_dispatch (syscall.c) number in r7, arguments r0-r5, result in r0;
+        |                    unimplemented numbers return -ENOSYS and are logged
+        |                    once each
+        v
+ kernel services             console device via the fd table, uaccess for user
+                             pointers, vmm/pmm for brk, processes for exit
+        |
+        v
+ __restore_regs (vectors.S)  writes SPSR and returns with "movs pc, lr", which
+                             switches to user mode and branches in one
+                             instruction, so an interrupt cannot arrive with the
+                             frame half popped
+```
+
+Three properties of this path are load-bearing and are the things to check first
+if userspace misbehaves:
+
+* **the frame's meaning depends on where the trap came from.** A trap from user
+  mode carries the user bank's `sp`/`lr`; a trap from a privileged mode carries
+  the interrupted *kernel* stack pointer and the resume address. The entry code
+  is what makes that true, and `lume/trapframe.h` states the contract.
+* **the kernel always runs with interrupts masked except at its explicit wait
+  points.** The entry masks them in the CPSR it runs on without disturbing the
+  status word the return restores, so a trap from user mode (where IRQs are on)
+  never means a handler starts with them on.
+* **user pointers are validated before they are used, in the address space that
+  will be used.** `copy_to_user()`/`copy_from_user()` check the range against the
+  live page tables; the `_as()` forms install the address space they were given
+  for the duration of the copy, which is what the boot-time stack build needs
+  (`uaccess` and the MMU must agree about which space is in play, or the copy
+  validates in one space and faults in another).
+
+## The ELF loader
+
+`elf_load()` maps a static `ET_EXEC` image into a fresh address space; the
+implementation notes - what is refused by name, why pages shared by two segments
+must be mapped once, and why the I-cache must be invalidated before the first
+user instruction - are in [userspace.md](userspace.md#4-elf-loading). The
+loader is deliberately strict: it would rather refuse an image with a named
+reason than map half of it and let the program fail somewhere less informative.
+
 ## Known weaknesses
 
 These are real and tracked, not hidden:
 
-* **The trap frame save order in `vectors.S` is wrong for r8/r9.** The IRQ and
-  abort entries save r8/r9 before the frame is complete; on a real core this can
-  corrupt a register on return. Nothing fails today because the whole kernel
-  runs in SVC mode, which is exactly why it has to be fixed before the first
-  userspace entry, together with a self test that would catch it.
+* **The r8/r9 save order is measured now, not argued about.** An earlier version
+  of the entry code saved r8/r9 before the frame was complete. The probe in
+  `arch/arm/trapprobe.S` puts a known pattern in all thirteen registers, takes a
+  real SVC, and fails a named check if any register - r8 and r9 included - does
+  not come back unchanged; it also checks that the kernel stack pointer is
+  exactly where it was, a check that failed on its first run and found a
+  64-byte-per-syscall stack leak in the SVC vector. What the probe still cannot
+  reach is the *user-bank* half of `__restore_regs`: it runs in SVC mode, so the
+  path a user thread takes is only exercised when `init` actually runs (which it
+  does - see [userspace.md](userspace.md) - but not by a self test).
 * **`__restore_regs` restores the user bank unconditionally**, so returning to a
   kernel thread through that path would do the wrong thing.
 * No cache maintenance strategy beyond explicit clean/invalidate around mailbox

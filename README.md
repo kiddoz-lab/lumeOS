@@ -32,13 +32,15 @@ exists and is checked to the extent an emulator and a host machine allow.
 | Bootable SD image (MBR + FAT16 + firmware) | built by CI as an artifact |
 | Host unit tests (`printf`, string library, division cores, build tools, both gates) | 23 tests pass locally and in CI |
 | Static gates (ARMv6 ISA, EABI calling convention) | pass on every build; enforced in CI |
-| In-kernel self tests (44 checks) | `44/44` under QEMU; printed on every boot and asserted by CI (`N == M`, at least 40) |
+| In-kernel self tests | `59/59` under QEMU (`ed52306`); printed on every boot and asserted by CI (`N == M`, at least 55) |
 | Boot stub, MMU, caches, high vectors | 🟡 executes under QEMU and reaches all four boot markers; **unverified on hardware** |
 | Exceptions, IRQs, system timer, scheduler | 🟡 ticks, dispatches IRQs and idles in QEMU without faulting (**unverified on hardware**) |
 | Serial console (PL011, 115200 8N1) | 🟡 prints, and the shell prompt reaches the terminal, under QEMU; **unverified on hardware** |
 | Kernel shell | 🟡 prompt appears under QEMU; no command has been typed into it yet |
 | Framebuffer / input / storage / networking | **not implemented** |
-| Userspace: ELF loader, syscalls, VFS, processes | **not implemented** (`main.c` prints that the hand-off is missing instead of pretending) |
+| ELF loader (static ARM `ET_EXEC`) | ✅ loads, maps and enters a program; refuses PIE and foreign architectures by name |
+| Userspace: syscalls, processes, consoles | 🟡 a static ARM ELF runs in user mode, makes syscalls (`write`/`read`/`brk`/`uname`/`wait4`/…) and exits with a status the kernel reaps; **unverified on hardware** |
+| VFS, filesystems, signals, pipes, `fork`, `futex`, `mmap` | **not implemented** (they return `-ENOSYS` and are logged once each) |
 
 The distinction matters and is maintained everywhere in this repository:
 *done* means it builds and is covered by a test that actually ran, *unverified*
