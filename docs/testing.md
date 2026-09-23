@@ -212,8 +212,8 @@ length:
    the controller's *basic pending* register mark themselves self-checking so
    that `do_irq()` services them even when the two shared pending registers read
    as empty. The same run now reports **74** exceptions instead of 1.6 million.
-2. **`vmm_translate()`'s "not mapped" sentinel collided with physical address
-   0.** The kernel maps virtual `0xC0000000` to *physical* 0 - the bottom of
+2. **`vmm_translate()`'s "not mapped" sentinel collided with physical
+   address 0.** The kernel maps virtual `0xC0000000` to *physical* 0 - the bottom of
    RAM, where the image is not, but where RAM begins - so a returned 0 could
    mean either "unmapped" or "mapped to physical 0", and the self test asking
    whether the kernel half is visible in a fresh address space could never pass.
