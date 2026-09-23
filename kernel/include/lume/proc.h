@@ -13,6 +13,7 @@
 #ifndef LUME_PROC_H
 #define LUME_PROC_H
 
+#include <lume/compiler.h>
 #include <lume/fs.h>
 #include <lume/sched.h>
 #include <lume/types.h>
@@ -38,6 +39,8 @@ struct process {
     int kind;
 
     struct vm_space *as;
+    u32 brk;          /* current program break (Linux brk(2)) */
+    u32 brk_base;     /* what the loader left behind: the heap's floor */
     struct file *fds[LUME_MAX_FDS];
     char cwd[LUME_PATH_MAX];
 
@@ -70,6 +73,18 @@ struct process *proc_create(const char *name, u32 entry, u32 user_sp, u32 arg,
                             struct process *parent);
 
 void proc_set_current(struct process *p);
+
+/** The kernel's own process (pid 0): what a kernel thread runs as. */
+struct process *proc_kernel_process(void);
+
+/** Called by the scheduler on every switch: a user thread runs as its process,
+ *  a kernel thread runs as pid 0.  Without this the syscall layer would
+ *  attribute a user program's syscalls to whatever ran before it. */
+void proc_switch_to(struct thread *t);
+
+/** Record where the loaded image ended, so brk(2) knows where the heap may
+ *  start and how far down it may be given back. */
+void proc_set_brk_base(struct process *p, u32 base);
 void proc_note_thread_exit(struct process *p, int code);
 
 /** Wait for a child to change state.  Linux wait4(pid, status, options,

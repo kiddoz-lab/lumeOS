@@ -14,6 +14,7 @@
 #ifndef LUME_MEM_H
 #define LUME_MEM_H
 
+#include <lume/compiler.h>
 #include <lume/types.h>
 
 /* ------------------------------------------------------------------ */

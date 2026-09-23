@@ -16,6 +16,8 @@
 #include <lume/asm.h>
 #include <lume/klog.h>
 #include <lume/panic.h>
+#include <lume/mem.h>
+#include <lume/proc.h>
 #include <lume/sched.h>
 #include <lume/string.h>
 #include <lume/time.h>
@@ -294,6 +296,29 @@ struct thread *sched_idle_thread(void)
     return idle_thread;
 }
 
+/*
+ * Reaping a dead thread.
+ *
+ * thread_exit() cannot free its own kernel stack - it is standing on it - so a
+ * thread that exits hands its stack to whoever runs next.  The stack is freed
+ * at the top of the next schedule() call on a different stack, and the slot is
+ * returned to the pool; a thread slot that never comes back would show up as
+ * "fork stops working after 63 processes", which is the kind of bug that only
+ * appears in the middle of a long-running program.
+ */
+static struct thread *reap_pending;
+
+static void reap_thread(struct thread *t)
+{
+    if (!t || t->state != THREAD_DEAD)
+        return;
+    if (t->kstack_pa) {
+        pmm_free_page(t->kstack_pa);
+        t->kstack_pa = 0;
+    }
+    memset(t, 0, sizeof(*t));   /* state becomes THREAD_UNUSED (0) */
+}
+
 static struct thread *pick_next(void)
 {
     struct thread *t;
@@ -313,6 +338,15 @@ void schedule(void)
     u32 flags = arm_irq_save();
 
     need_resched = 0;
+
+    /* Collect a thread that exited before this call.  Never the caller's own,
+     * because its stack is the one we are using. */
+    if (reap_pending && reap_pending != prev) {
+        struct thread *dead = reap_pending;
+
+        reap_pending = NULL;
+        reap_thread(dead);
+    }
 
     if (prev && prev->state == THREAD_RUNNING)
         prev->state = THREAD_READY;
@@ -335,7 +369,11 @@ void schedule(void)
 
     next->state = THREAD_RUNNING;
     current = next;
+    proc_switch_to(next);
     sched_context_switches++;
+
+    if (prev && prev->state == THREAD_DEAD)
+        reap_pending = prev;
 
     arch_switch_to(prev, next);
 

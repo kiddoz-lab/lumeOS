@@ -58,13 +58,27 @@ BOOT_MARKERS = [
     "main: entering the idle loop",
 ]
 
+# The userspace evidence, in two halves.  The first and last lines come from
+# the kernel (the hand-off and the wait that reaps the child); the middle two
+# are written by userspace/init/main.c using the Linux ARM EABI write(2)
+# syscall, so they can only exist if the ELF was loaded and mapped, the CPU
+# entered user mode, the svc instruction reached the kernel's dispatcher, the
+# console device took the bytes and the exception return put the program back
+# where it was.  A kernel that merely boots cannot produce them.
+USER_MARKERS = [
+    "init: entering user mode at",
+    "init: hello from user mode",
+    "init: exiting with status 0",
+    "init: pid 1 exited with status 0",
+]
+
 # "selftest: 24/24 checks passed"
 SELFTEST_RE = re.compile(r"selftest: (\d+)/(\d+) checks passed")
 # The kernel prints "selftest: N/M checks passed" on every boot; a run that
 # reports fewer checks than this has lost most of its self tests (a build
 # problem, a truncated boot), and the count is asserted so that the summary
-# cannot quietly become vacuous.  The kernel currently defines 44 checks.
-MIN_SELFTEST_CHECKS = 40
+# cannot quietly become vacuous.  The kernel currently defines 59 checks.
+MIN_SELFTEST_CHECKS = 55
 
 FAILURE_PATTERNS = [
     "PANIC",
@@ -183,6 +197,14 @@ def evaluate(output: str) -> tuple[bool, list[str]]:
         if marker not in output:
             problems.append(f"missing boot marker: {marker!r}")
 
+    # The userspace markers are asserted the same way.  They are the difference
+    # between "the kernel boots" and "the kernel runs a program", which is the
+    # claim this whole milestone is about, so a regression that breaks user mode
+    # has to fail the build loudly - not produce a boot that merely looks fine.
+    for marker in USER_MARKERS:
+        if marker not in output:
+            problems.append(f"missing userspace marker: {marker!r}")
+
     for pattern in FAILURE_PATTERNS:
         if pattern in output:
             problems.append(f"output contains failure pattern: {pattern!r}")
@@ -260,9 +282,11 @@ def main(argv: list[str]) -> int:
 
         if ok:
             match = SELFTEST_RE.search(output)
+            user = "user mode reached" if all(m in output for m in USER_MARKERS) \
+                else "USER MODE MARKERS MISSING"
             print(f"run_qemu_test: PASS via '{strategy}' "
                   f"(kernel self tests {match.group(1)}/{match.group(2)}, "
-                  f"booting in QEMU's {args.machine} model)")
+                  f"{user}, booting in QEMU's {args.machine} model)")
             print("run_qemu_test: --- kernel console output ---")
             print(output.rstrip())
             print("run_qemu_test: --- end of console output ---")

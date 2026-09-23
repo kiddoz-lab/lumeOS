@@ -12,6 +12,7 @@
 #ifndef LUME_FS_H
 #define LUME_FS_H
 
+#include <lume/compiler.h>
 #include <lume/fcntl.h>
 #include <lume/types.h>
 

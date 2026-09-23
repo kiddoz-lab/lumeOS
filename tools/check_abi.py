@@ -31,8 +31,15 @@ This tool looks for that class of bug specifically:
 It is a static check on the linked ELF: a second on any machine with capstone,
 no QEMU and no ARM CPU required.
 
+The kernel must define all six helpers, because any C code in it may call one.
+A userspace program is a different case: it is linked with -nostdlib, so if it
+ever calls a helper the link fails unless the program defines it itself - the
+linker, not this tool, is what guarantees closure there.  `--allow-none` accepts
+an image that defines none of them (and then there is nothing to check), while
+still checking the layout of any helper that *is* defined.
+
 Usage:
-    tools/check_abi.py build/lumeos.elf [--require-capstone] [-q]
+    tools/check_abi.py build/lumeos.elf [--require-capstone] [--allow-none] [-q]
 """
 
 from __future__ import annotations
@@ -245,13 +252,22 @@ def problems_for(insns, funcs) -> list[str]:
     return problems
 
 
-def helper_problems(path: Path) -> list[str]:
-    """Return a list of ABI problems found in `path` (empty means good)."""
+def helper_problems(path: Path, allow_none: bool = False) -> tuple[list[str], bool]:
+    """Return the ABI problems found in `path`, and whether any helper exists.
+
+    With `allow_none`, an image that defines no helper at all is reported as
+    "nothing to check" rather than as a failure; a partially defined set is
+    still an error, because that means the image was meant to provide them.
+    """
     funcs = [(addr, size, name) for addr, size, name in symbols(path)
              if name in RTABI_HELPERS]
     problems: list[str] = []
+    defined = {name for _a, _s, name in funcs}
 
-    missing = sorted(set(RTABI_HELPERS) - {name for _a, _s, name in funcs})
+    if not defined and allow_none:
+        return [], False
+
+    missing = sorted(set(RTABI_HELPERS) - defined)
     if missing:
         problems.append("missing EABI helper(s): " + ", ".join(missing))
 
@@ -259,7 +275,7 @@ def helper_problems(path: Path) -> list[str]:
     for addr, chunk in executable_chunks(path):
         insns.extend(disassemble(chunk, addr))
     insns.sort(key=lambda insn: insn.address)
-    return problems + problems_for(insns, funcs)
+    return problems + problems_for(insns, funcs), bool(defined)
 
 
 def main(argv: list[str]) -> int:
@@ -269,6 +285,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--require-capstone", action="store_true",
                         help="fail when capstone is missing instead of skipping "
                              "the check")
+    parser.add_argument("--allow-none", action="store_true",
+                        help="accept an image that defines no EABI helper "
+                             "(a freestanding userspace program linked with "
+                             "-nostdlib); any helper it does define is still "
+                             "checked")
     parser.add_argument("-q", "--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -277,7 +298,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     try:
-        problems = helper_problems(args.elf)
+        problems, has_helpers = helper_problems(args.elf, args.allow_none)
     except CapstoneMissing as exc:
         if args.require_capstone:
             print(f"check_abi: FAIL: {exc}", file=sys.stderr)
@@ -295,7 +316,11 @@ def main(argv: list[str]) -> int:
         return 1
 
     if not args.quiet:
-        print(f"check_abi: {args.elf}: ok (EABI helpers use the rtabi layout)")
+        if has_helpers:
+            print(f"check_abi: {args.elf}: ok (EABI helpers use the rtabi layout)")
+        else:
+            print(f"check_abi: {args.elf}: ok (no EABI helper in this image; "
+                  "the link is what guarantees closure)")
     return 0
 
 

@@ -6,6 +6,7 @@
  * object (and therefore the file offset), which is exactly Linux behaviour.
  */
 #include <lume/errno.h>
+#include <lume/fd.h>
 #include <lume/fs.h>
 #include <lume/klog.h>
 #include <lume/mem.h>

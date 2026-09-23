@@ -11,6 +11,7 @@
 #ifndef LUME_SCHED_H
 #define LUME_SCHED_H
 
+#include <lume/compiler.h>
 #include <lume/trapframe.h>
 #include <lume/types.h>
 
@@ -67,6 +68,7 @@ u32 thread_count(void);
 int  arch_thread_init_kernel(struct thread *t, void (*fn)(void *), void *arg);
 int  arch_thread_init_user(struct thread *t, u32 entry, u32 user_sp, u32 arg);
 void arch_switch_to(struct thread *prev, struct thread *next);
+int arch_thread_set_user_entry(struct thread *t, u32 entry, u32 user_sp, u32 arg);
 
 /* ------------------------------------------------------------------ */
 /* Wait queues                                                         */

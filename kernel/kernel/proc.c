@@ -7,6 +7,7 @@
 #include <lume/mem.h>
 #include <lume/panic.h>
 #include <lume/errno.h>
+#include <lume/fd.h>
 #include <lume/proc.h>
 #include <lume/sched.h>
 #include <lume/string.h>
@@ -25,9 +26,30 @@ struct process *proc_current(void)
     return current;
 }
 
+void proc_set_brk_base(struct process *p, u32 base)
+{
+    if (!p)
+        return;
+    p->brk_base = base;
+    p->brk = base;
+}
+
 void proc_set_current(struct process *p)
 {
     current = p;
+}
+
+struct process *proc_kernel_process(void)
+{
+    return &processes[0];
+}
+
+void proc_switch_to(struct thread *t)
+{
+    if (t && t->is_user && t->proc)
+        current = t->proc;
+    else
+        current = &processes[0];
 }
 
 struct process *proc_by_pid(u32 pid)
@@ -110,10 +132,8 @@ struct process *proc_create(const char *name, u32 entry, u32 user_sp, u32 arg,
 
     /* Inherit the parent's open files, exactly like fork(2). */
     fd_init_process(p);
-    if (parent) {
-        extern int fd_inherit(struct process *child, struct process *parent);
+    if (parent)
         fd_inherit(p, parent);
-    }
 
     if (parent) {
         for (u32 i = 0; i < LUME_MAX_PROCESSES; i++) {

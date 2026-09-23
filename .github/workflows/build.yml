@@ -78,6 +78,7 @@ jobs:
           name: ci-logs
           path: |
             build-kernel.log
+            userspace.log
             host-tests.log
             build-image.log
             qemu-test.log
@@ -91,6 +92,24 @@ jobs:
           cmp build/kernel.img build/kernel-verify.img
           file build/kernel.img build/lumeos.elf
           arm-none-eabi-size build/lumeos.elf || true
+
+      # userspace/init is built by `make kernel` as well (the kernel image
+      # embeds it), but it is built and checked here on its own so that a
+      # failure says which half broke.
+      - name: Build the first user program (build/userspace/init.elf)
+        run: |
+          set -o pipefail
+          if ! make userspace 2>&1 | tee userspace.log; then
+            python3 tools/ci_annotate.py userspace.log --title "make userspace"
+            exit 1
+          fi
+          file build/userspace/init.elf
+          arm-none-eabi-readelf -h -l build/userspace/init.elf | head -30
+          arm-none-eabi-size build/userspace/init.elf || true
+          # Record what the kernel will load: the QEMU test asserts that the
+          # program's own output appears, so these numbers belong in the run.
+          python3 tools/ci_annotate.py userspace.log --notice \
+              --title "userspace init image" --grep "built from" --max-chars 400
 
       - name: Host unit tests (printf, string library, build tools)
         run: |
@@ -140,6 +159,7 @@ jobs:
           path: |
             build/kernel.img
             build/lumeos.elf
+            build/userspace/init.elf
           if-no-files-found: error
           retention-days: 30
 

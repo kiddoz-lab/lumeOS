@@ -84,6 +84,32 @@ int arch_thread_init_user(struct thread *t, u32 entry, u32 user_sp, u32 arg)
     return 0;
 }
 
+/*
+ * Set (or correct) where a user thread starts.
+ *
+ * thread_create_user() is normally given the entry point and stack up front.
+ * The initial process is different: its address space has to exist before the
+ * image can be mapped into it, and the entry point is only known after the
+ * image has been parsed - so the process and its thread are created first and
+ * this fixes up the trap frame before the thread is ever scheduled.  The
+ * kernel stack is untouched: only the frame the restore path will pop changes.
+ */
+int arch_thread_set_user_entry(struct thread *t, u32 entry, u32 user_sp, u32 arg)
+{
+    struct trapframe *tf;
+
+    if (!t || !t->is_user || !t->tf)
+        return -1;
+
+    tf = t->tf;
+    tf->r[0] = arg;
+    tf->sp = user_sp;
+    tf->pc = entry;
+    tf->cpsr = MODE_USR;   /* user mode, IRQs and FIQs enabled */
+    tf->lr = 0;
+    return 0;
+}
+
 void arch_switch_to(struct thread *prev, struct thread *next)
 {
     struct vm_space *next_as;

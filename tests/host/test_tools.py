@@ -358,13 +358,34 @@ class CheckAbiTests(unittest.TestCase):
         self.assertTrue(problems, "reading [r0] after the call is not the EABI way")
         self.assertIn("dereferences r0", problems[0])
 
+    def test_userspace_image_needs_no_helpers(self):
+        """A freestanding program that calls none is a valid --allow-none case.
+
+        A program linked with -nostdlib either defines a helper it calls or
+        fails to link, so there is nothing for the gate to guarantee - except
+        that it must not fail the build for the absence.
+        """
+        elf = REPO / "build" / "userspace" / "init.elf"
+        if not elf.is_file():
+            self.skipTest("build/userspace/init.elf not built (run 'make userspace')")
+        try:
+            problems, has_helpers = check_abi.helper_problems(elf, allow_none=True)
+        except check_abi.CapstoneMissing as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(problems, [])
+        self.assertFalse(has_helpers,
+                         "this image unexpectedly defines an EABI helper; if it "
+                         "now does, check its layout like the kernel's")
+
     def test_built_kernel_helpers_are_clean(self):
         """Integration check against the real linked kernel, when it exists."""
         elf = REPO / "build" / "lumeos.elf"
         if not elf.is_file():
             self.skipTest("build/lumeos.elf not built (run 'make kernel' first)")
         try:
-            problems = check_abi.helper_problems(elf)
+            problems, has_helpers = check_abi.helper_problems(elf)
         except check_abi.CapstoneMissing as exc:
             self.skipTest(str(exc))
+        # The kernel must define all six helpers: any C code in it may call one.
+        self.assertTrue(has_helpers, "the kernel defines no EABI helper at all")
         self.assertEqual(problems, [])

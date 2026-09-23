@@ -12,6 +12,8 @@
  */
 #include <lume/asm.h>
 #include <lume/config.h>
+#include <lume/elf.h>
+#include <lume/init.h>
 #include <lume/klog.h>
 #include <lume/mem.h>
 #include <lume/proc.h>
@@ -265,6 +267,52 @@ static void test_trapframe(void)
     check("stack pointer survives the round trip", r->sp_after == r->sp_at_svc);
 }
 
+/*
+ * The ELF loader's validation half, tested against the image the kernel will
+ * actually run - which is the point: a validator that accepts everything, or
+ * rejects the one image it is given, is useless, and both failure modes are
+ * invisible until the machine is in front of you.
+ *
+ * The mutations below are made on a copy of the first 64 bytes (the header)
+ * because the original is in .rodata and must stay pristine.
+ */
+static void test_elf(void)
+{
+    const struct elf32_ehdr *ehdr = NULL;
+    const char *reason = NULL;
+    u8 header[64];
+
+    check("elf: embedded init validates",
+          elf_validate(lume_init_elf, lume_init_elf_size, &ehdr, &reason) == 0);
+    check("elf: entry matches the symbol table",
+          ehdr && ehdr->e_entry == lume_init_elf_entry);
+    check("elf: image is a static ARM executable",
+          ehdr && ehdr->e_type == ELF_ET_EXEC && ehdr->e_machine == ELF_EM_ARM);
+
+    if (lume_init_elf_size > sizeof(header)) {
+        memcpy(header, lume_init_elf, sizeof(header));
+
+        header[16] = (u8)((ELF_ET_DYN >> 0) & 0xFF);  /* e_type = ET_DYN */
+        header[17] = (u8)((ELF_ET_DYN >> 8) & 0xFF);
+        check("elf: PIE is refused",
+              elf_validate(header, sizeof(header), NULL, &reason) < 0);
+
+        memcpy(header, lume_init_elf, sizeof(header));
+        header[18] = 0x3E;   /* e_machine = EM_X86_64 */
+        header[19] = 0x00;
+        check("elf: a foreign architecture is refused",
+              elf_validate(header, sizeof(header), NULL, &reason) < 0);
+
+        memcpy(header, lume_init_elf, sizeof(header));
+        header[0] = 'X';     /* not an ELF file at all */
+        check("elf: a non-ELF image is refused",
+              elf_validate(header, sizeof(header), NULL, &reason) < 0);
+
+        check("elf: a truncated image is refused",
+              elf_validate(lume_init_elf, 32, NULL, &reason) < 0);
+    }
+}
+
 void selftest_run(void)
 {
     tests_run = 0;
@@ -280,6 +328,7 @@ void selftest_run(void)
     test_vmm();
     test_proc();
     test_trapframe();
+    test_elf();
 
     if (tests_failed == 0)
         pr_notice("selftest: %d/%d checks passed", tests_run - tests_failed, tests_run);

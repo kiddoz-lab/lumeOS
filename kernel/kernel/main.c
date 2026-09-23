@@ -12,6 +12,13 @@
  */
 #include <lume/asm.h>
 #include <lume/config.h>
+#include <lume/console.h>
+#include <lume/elf.h>
+#include <lume/fd.h>
+#include <lume/fs.h>
+#include <lume/mem.h>
+#include <lume/fcntl.h>
+#include <lume/init.h>
 #include <lume/klog.h>
 #include <lume/mem.h>
 #include <lume/panic.h>
@@ -56,20 +63,162 @@ void kernel_main(u32 fdt_pa, u32 load_addr);
 /*
  * Userspace hand-off.
  *
- * The intended sequence (docs/roadmap.md) is: find the init program (initramfs
- * or /bin/init on the SD card), load it with the ELF loader, create a user
- * process and enter ARM user mode through the same trap-frame return path the
- * exception vectors use.
+ * There is no filesystem yet, so the first program is embedded in the kernel
+ * image (tools/embed_user.py) - but it is loaded, mapped and entered exactly
+ * the way a /bin/init from a card would be: parse the ELF, map each PT_LOAD
+ * segment into a fresh address space, build the initial stack with argc/argv,
+ * and let the scheduler return to user mode through the same trap-frame path
+ * every later exception uses.
  *
- * None of that exists yet: there is no filesystem, no ELF loader and no
- * syscall layer, so this build deliberately drops into the kernel shell and
- * says so, rather than starting a program that cannot work.
+ * The three lines this prints are the evidence that the whole chain worked:
+ * "entering user mode" comes from the kernel, the program's own output comes
+ * from a write(2) issued in user mode, and the exit status comes from the
+ * kernel reaping the process it started.
  */
-static void init_start(void)
+static struct process *init_proc;
+
+/* A word of zero, used for the NULL terminators of argv and envp.  Taking its
+ * address is how the stack is filled through copy_to_user(), which is what
+ * validates the destination range before writing it. */
+static const u32 zero_word;
+
+/* A kernel thread that behaves like a shell's parent: it waits for init to
+ * exit and reports the status.  Doing it with a real wait4-style wait (rather
+ * than polling the process table) means the mechanism a shell will use is the
+ * one being exercised. */
+static void init_watchdog(void *arg)
 {
-    pr_notice("init: userspace hand-off is not implemented in this build; "
-              "starting the kernel shell instead (docs/roadmap.md)");
-    kshell_start();
+    struct process *init = (struct process *)arg;
+    struct process *parent = init->parent;
+    u32 status = 0;
+    int pid = proc_wait(parent, (s32)init->pid, 0, &status);
+
+    if (pid < 0) {
+        pr_err("init: wait for pid %u failed (%d)", init->pid, pid);
+        return;
+    }
+    /* Linux wait(2) status encoding: normal exit is (code & 0xFF) << 8. */
+    if ((status & 0x7F) == 0)
+        pr_notice("init: pid %u exited with status %u (exit code %u)",
+                  init->pid, status, (status >> 8) & 0xFF);
+    else
+        pr_notice("init: pid %u was killed by signal %u", init->pid, status & 0x7F);
+}
+
+/*
+ * Build the initial user stack: the strings the program can see, then argv,
+ * then argc, exactly as the Linux ABI describes process entry
+ * (see docs/userspace.md section 2).  Returns the stack pointer to start with,
+ * or 0 on failure.
+ */
+static u32 build_user_stack(struct process *p, const char **argv_in, u32 argc)
+{
+    u32 top = LUME_USER_STACK_TOP;
+    u32 base = top - LUME_INIT_STACK_PAGES * PAGE_SIZE;
+    u32 sp = top;
+    u32 argv_user[8];
+    const char *argv_local[8];
+    u32 i;
+
+    if (argc > 8)
+        argc = 8;
+
+    for (i = 0; i < LUME_INIT_STACK_PAGES; i++) {
+        u32 pa = pmm_alloc_page();
+
+        if (!pa)
+            return 0;
+        memset((void *)PHYS_TO_VIRT(pa), 0, PAGE_SIZE);
+        if (vmm_map_page(p->as, base + i * PAGE_SIZE, pa,
+                         VM_FLAG_USER | VM_FLAG_WRITE) < 0) {
+            pmm_free_page(pa);
+            return 0;
+        }
+    }
+
+    /* Copy the argument strings near the top of the stack, keeping sp
+     * 8-byte aligned so that the ABI's alignment promise holds at entry. */
+    for (i = 0; i < argc; i++) {
+        u32 len = strlen(argv_in[i]) + 1;
+
+        sp -= len;
+        sp &= ~7u;
+        if (copy_to_user((void *)sp, argv_in[i], len) < 0)
+            return 0;
+        argv_user[i] = sp;
+    }
+
+    /* The pointers themselves, then the terminator, then argc, then a single
+     * NULL for the (currently empty) environment. */
+    sp &= ~7u;
+    sp -= 4;
+    if (copy_to_user((void *)sp, &zero_word, 4) < 0)   /* envp[0] = NULL */
+        return 0;
+    for (i = argc; i > 0; i--) {
+        sp -= 4;
+        if (copy_to_user((void *)sp, &argv_user[i - 1], 4) < 0)
+            return 0;
+    }
+    sp -= 4;
+    if (copy_to_user((void *)sp, &argc, 4) < 0)
+        return 0;
+
+    (void)argv_local;
+    return sp;
+}
+
+struct process *init_start(struct process *launcher)
+{
+    struct elf_image image;
+    struct process *p;
+    u32 sp;
+    const char *argv[2];
+    u32 flags;
+
+    pr_notice("init: loading the embedded %u-byte init image (entry 0x%08x, "
+              "sha256 %s)", lume_init_elf_size, lume_init_elf_entry,
+              lume_init_elf_sha256);
+
+    /* The process and its thread are created first (a process owns its address
+     * space) and the entry point is fixed up once the image has been parsed;
+     * interrupts stay off across the whole sequence so the new thread cannot
+     * be scheduled before there is anything to run. */
+    flags = arm_irq_save();
+    p = proc_create("init", 0, 0, 0, launcher);
+    if (!p) {
+        arm_irq_restore(flags);
+        pr_err("init: cannot create the init process");
+        return NULL;
+    }
+
+    if (elf_load(p->as, lume_init_elf, lume_init_elf_size, &image) < 0) {
+        arm_irq_restore(flags);
+        pr_err("init: the embedded image did not load");
+        return NULL;
+    }
+    proc_set_brk_base(p, image.image_end);
+
+    argv[0] = "/bin/init";
+    argv[1] = NULL;
+    sp = build_user_stack(p, argv, 1);
+    if (!sp) {
+        arm_irq_restore(flags);
+        pr_err("init: cannot build the initial stack");
+        return NULL;
+    }
+
+    /* Three standard descriptors on the console device, like any process a
+     * shell would start. */
+    for (int fd = 0; fd < 3; fd++)
+        fd_open_node(p, console_device(), fd == 0 ? O_RDONLY : O_WRONLY);
+
+    arch_thread_set_user_entry(p->thread, image.entry, sp, 0);
+    arm_irq_restore(flags);
+
+    pr_notice("init: entering user mode at 0x%08x on stack 0x%08x "
+              "(%u segments, %u pages)", image.entry, sp, image.segments,
+              image.pages);
+    return p;
 }
 
 static u32 kernel_image_end_pa;
@@ -157,10 +306,19 @@ void kernel_main(u32 fdt_pa, u32 load_addr)
     pr_notice("LumeOS: boot complete, %u KiB free, %llu timer ticks",
               pmm_free_bytes() / 1024, (unsigned long long)timer_ticks());
 
-    /* Hand over to userspace when there is an init program; otherwise drop
-     * into the kernel shell, which is a bring-up tool rather than a userspace
-     * shell (docs/roadmap.md tracks the difference). */
-    init_start();
+    /* Hand over to the first user process.  If that fails the kernel says so
+     * and drops into its own shell, which is a bring-up tool rather than a
+     * userspace shell (docs/roadmap.md tracks the difference). */
+    init_proc = init_start(proc_current());
+    if (init_proc) {
+        if (!thread_create("init-watchdog", init_watchdog, init_proc)) {
+            pr_warn("main: cannot start the init watchdog; the exit status of "
+                    "pid %u will not be reported", init_proc->pid);
+        }
+    } else {
+        pr_notice("init: no user process was started; starting the kernel shell");
+        kshell_start();
+    }
 
     pr_info("main: entering the idle loop");
     kernel_idle_loop();

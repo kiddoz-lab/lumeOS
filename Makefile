@@ -78,6 +78,8 @@ KERNEL_C := \
     kernel/kernel/time.c \
     kernel/kernel/selftest.c \
     kernel/kernel/kshell.c \
+    kernel/kernel/elf.c \
+    kernel/kernel/syscall.c \
     kernel/mm/pmm.c \
     kernel/mm/kmalloc.c \
     kernel/mm/uaccess.c \
@@ -92,7 +94,8 @@ KERNEL_C := \
     kernel/drivers/uart_pl011.c \
     kernel/drivers/gpio.c \
     kernel/drivers/mbox.c \
-    kernel/drivers/input_serial.c
+    kernel/drivers/input_serial.c \
+    kernel/drivers/console.c
 
 KERNEL_S := \
     kernel/arch/arm/boot.S \
@@ -103,7 +106,30 @@ KERNEL_S := \
 # Note: a .c and a .S file with the same stem (foo.c and foo.S) would both
 # become $(BUILD)/foo.o and be linked twice - keep the stems distinct.
 KERNEL_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(KERNEL_C)) \
-               $(patsubst %.S,$(BUILD)/%.o,$(KERNEL_S))
+               $(patsubst %.S,$(BUILD)/%.o,$(KERNEL_S)) \
+               $(BUILD)/init_blob.o
+
+# ---------------------------------------------------------------------------
+# Userspace
+# ---------------------------------------------------------------------------
+# The first user program: a static 32-bit ARM ELF built with the same
+# toolchain and the same architecture flags as the kernel, then embedded in the
+# kernel image by tools/embed_user.py because there is no filesystem yet.
+#
+# It is built with -nostdlib and its own crt0 (userspace/lib/crt0.S), so the
+# image contains only this program - which is what makes it a fair test of
+# "can LumeOS run a static ARM Linux binary", rather than a test of a libc.
+USERSPACE_C   := userspace/init/main.c
+USERSPACE_S   := userspace/lib/crt0.S
+USERSPACE_LD  := userspace/init/linker.ld
+USER_ELF      := $(BUILD)/userspace/init.elf
+
+USER_CFLAGS   := $(ARCHFLAGS) -ffreestanding -fno-builtin -fno-common \
+                 -fno-stack-protector -fno-omit-frame-pointer -fno-pic -fno-pie \
+                 -Wall -Wextra -std=gnu11 -O2 -g3 \
+                 -I userspace/lib -nostdinc
+USER_LDFLAGS  := -nostdlib -nostartfiles -static -Wl,--build-id=none \
+                 -Wl,-z,max-page-size=4096 -Wl,--no-warn-rwx-segments
 
 # ---------------------------------------------------------------------------
 # Rules
@@ -127,6 +153,25 @@ $(KERNEL): $(KERNEL_OBJS) $(LDSCRIPT)
 	$(CC) $(ARCHFLAGS) $(LDFLAGS) $(KERNEL_OBJS) -o $@
 	$(PYTHON) tools/check_isa.py $(CHECK_ISA_FLAGS) $@
 	$(PYTHON) tools/check_abi.py $(CHECK_ABI_FLAGS) $@
+
+userspace: $(USER_ELF)
+
+$(USER_ELF): $(USERSPACE_C) $(USERSPACE_S) $(USERSPACE_LD)
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T $(USERSPACE_LD) $(USER_LDFLAGS) \
+	    $(USERSPACE_S) $(USERSPACE_C) -o $@
+	$(PYTHON) tools/check_isa.py $(CHECK_ISA_FLAGS) $@
+	$(PYTHON) tools/check_abi.py $(CHECK_ABI_FLAGS) --allow-none $@
+	@echo "userspace: $@ built from $(USERSPACE_C)"
+
+# The blob is a build product; the kernel links it like any other object.
+$(BUILD)/init_blob.c: $(USER_ELF) tools/embed_user.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) tools/embed_user.py $(USER_ELF) --symbol lume_init_elf --output $@
+
+$(BUILD)/init_blob.o: $(BUILD)/init_blob.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(KERNEL_IMG): $(KERNEL)
 	$(PYTHON) tools/elf2bin.py $< $@ --require-paddr 0x8000
@@ -157,13 +202,16 @@ help:
 	@echo "LumeOS build targets:"
 	@echo "  all         - build the kernel and the SD card image"
 	@echo "  kernel      - build build/kernel.img (Raspberry Pi kernel image)"
+	@echo "  userspace   - build build/userspace/init.elf (the first user program)"
 	@echo "  image       - build build/lumeos-sd.img (bootable SD card image)"
 	@echo "  test-host   - run host-side unit tests"
 	@echo "  test-qemu   - boot the kernel under QEMU (raspi0) and check output"
 	@echo "  test        - alias for test-host"
 	@echo "  firmware    - download the Raspberry Pi boot firmware into .firmware"
 	@echo ""
-	@echo "There is no 'userspace' target yet: userspace/ does not exist."
-	@echo "The plan is in docs/userspace.md and docs/roadmap.md."
+	@echo ""
+	@echo "make userspace builds the init program on its own; the kernel target"
+	@echo "rebuilds it too, because kernel.img embeds it (there is no filesystem"
+	@echo "yet - see docs/userspace.md)."
 
 -include $(KERNEL_OBJS:.o=.d)
