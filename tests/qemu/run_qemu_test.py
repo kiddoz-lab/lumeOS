@@ -82,7 +82,7 @@ SELFTEST_RE = re.compile(r"selftest: (\d+)/(\d+) checks passed")
 # The kernel prints "selftest: N/M checks passed" on every boot; a run that
 # reports fewer checks than this has lost most of its self tests (a build
 # problem, a truncated boot), and the count is asserted so that the summary
-# cannot quietly become vacuous.  The kernel currently runs 85 checks, 26 of
+# cannot quietly become vacuous.  The kernel currently runs 91 checks: 26 of
 # which are the initial-stack/auxv tests.
 MIN_SELFTEST_CHECKS = 80
 

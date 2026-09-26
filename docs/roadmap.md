@@ -6,7 +6,7 @@ Statuses are kept strict - *works* means a test that actually ran passed, not
 
 | | |
 | --- | --- |
-| Today | a static ARM ELF loads and runs in user mode: `init` prints from user mode, makes syscalls and exits with a status the kernel reaps (CI-enforced, `59/59` self tests) |
+| Today | a static ARM ELF loads and runs in user mode: `init` prints from user mode, makes syscalls, is handed `argv`/`envp`/`auxv` on a Linux-shaped stack, checks that stack against its own copy of the numbers and exits with a status the kernel reaps (CI-enforced, `91/91` self tests at `aeb1cb4`) |
 | Next | validate the same image on a real Pi Zero W, then give userspace a filesystem to load programs from |
 | Then | the syscall surface a real libc needs - `auxv`, `mmap2`, `openat`, `stat64`, signals, `clone`, `futex` - and then a real ARM Linux binary |
 
@@ -231,13 +231,17 @@ Three rules, enforced by convention and by CI:
 
 In the order the next commits should happen:
 
-1. **A static musl binary, then what it asks for.** The auxiliary vector is in
-   place (`docs/userspace.md` lists the pairs), so the next step is to build a
-   static `hello world` with a real C library, run it, and implement what it
-   turns out to need. The expected list is `mmap2`, `mprotect`, `munmap`,
-   `clock_gettime` and `rt_sigaction`; the honest way to order them is the log
-   line the kernel already prints for each unimplemented number. Its startup
-   will also exercise the initial stack in a way our own program cannot.
+1. **A static musl binary, then what it asks for.** The entry contract a libc
+   reads before `main` is now in place and verified from both ends - the
+   17 auxiliary vector pairs, the Linux stack layout, and `AT_PHDR` pointing at
+   program headers that the linker script now maps; `docs/userspace.md` §2 lists
+   each one, and CI reports `91/91` self tests at `aeb1cb4`. The next step is to
+   build a static `hello world` with a real C library, run it, and implement
+   what it turns out to need. The expected list is `mmap2`, `mprotect`,
+   `munmap`, `clock_gettime` and `rt_sigaction`; the honest way to order them is
+   the log line the kernel already prints for each unimplemented number. Its
+   startup will exercise the stack, the header lookup and `set_tls` in ways our
+   own program does not.
 2. **A filesystem, so the next program is not embedded in the kernel.** A
    read-only FAT16 reader on the SD card plus path lookup in the VFS is the
    smallest thing that turns `init` from a blob in `.rodata` into `/bin/init`,

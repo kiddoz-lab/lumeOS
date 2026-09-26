@@ -61,6 +61,21 @@ compiler's ABI documents are used - as the published interface definition.
   in some binaries.
 * glibc and musl both need `AT_HWCAP`, `AT_PAGESZ` and `AT_RANDOM` in `auxv`;
   a missing `AT_RANDOM` makes a hardened libc abort before `main`.
+* `AT_PHDR` is the address of the program header *table* in the program's own
+  address space, not `e_phoff`. `fs/binfmt_elf.c` (v6.6, `load_elf_binary`)
+  computes it by finding the `PT_LOAD` whose file range contains `e_phoff` and
+  using `e_phoff - p_offset + p_vaddr`, then adding the load bias; if no segment
+  contains the headers it stays `0`. Nothing about the image guarantees the
+  headers are mapped - it is a property of the linker script (`FILEHDR PHDRS`,
+  text starting at the load address plus `SIZEOF_HEADERS`), and a script that
+  does not do it produces a program that dies the first time a libc reads its
+  own `PT_TLS` or `PT_GNU_RELRO`. Our own `userspace/init/linker.ld` did exactly
+  that until it was caught, which is why `tools/embed_user.py` now refuses such
+  an image at build time.
+* `create_elf_tables()` writes the auxiliary vector in a fixed order (HWCAP,
+  PAGESZ, CLKTCK, PHDR, PHENT, PHNUM, BASE, FLAGS, ENTRY, UID, EUID, GID, EGID,
+  SECURE, RANDOM, EXECFN, PLATFORM, then `AT_NULL`), pushes the strings *above*
+  the tables, and rounds `sp` to 16 bytes, not the 8 the EABI requires.
 * TLS on ARM has several variants; the two worth supporting are
   `__ARM_NR_set_tls` and `CLONE_SETTLS`.
 * `struct stat64` on ARM is *not* the same layout as on x86 - field order and

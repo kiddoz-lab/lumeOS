@@ -308,7 +308,7 @@ refusals it makes by name:
 | Step | Behaviour |
 | --- | --- |
 | Header check | `ELFCLASS32`, `ELFDATA2LSB`, `EM_ARM`, `ET_EXEC`. Anything else is refused with a reason string, printed by the kernel: a PIE is refused as *"ET_DYN (PIE/shared object) needs a relocation loader"* rather than failing later at address 0 |
-| Bounds | every `p_offset`/`p_filesz` is checked against the image size, and every segment against the user address range `0x00010000..0xB0000000`, so a truncated or hostile image cannot fault the kernel mid-copy |
+| Bounds | every `p_offset`/`p_filesz` is checked against the image size, and every segment against the user address range `0x00010000..0xB0000000`, so a truncated or hostile image cannot fault the kernel mid-copy. A `PT_LOAD` with `p_memsz == 0` is skipped - there is nothing to map, and the toolchains differ about whether they emit one: GNU `ld` keeps an empty segment for a `PHDRS` entry whose sections are all empty (it appears in `readelf -l` at address `0`, which is why a CI `init.elf` reports `AT_PHNUM 4` where a `zig`/`lld` build reports 3) while `lld` drops it |
 | Mapping | one page at a time, `p_flags` → `VM_FLAG_USER/WRITE/EXEC`; a page shared by two segments is mapped **once** and written twice (legal, and what the linker produces when `.text` and `.rodata` land in one page) |
 | `bss` | the remainder of every segment is zeroed before mapping, so the page never exposes another program's data |
 | Coherence | the data cache is cleaned and the instruction cache invalidated for the mapped range - ARMv6 has separate I and D caches, and without this the CPU can execute whatever the I-cache held for that physical page |
@@ -360,7 +360,7 @@ code does not contain. Nothing here is aspirational.
 
 | Piece | State |
 | --- | --- |
-| ELF32 loader (`kernel/kernel/elf.c`) | ✅ loads, maps and enters a static `EM_ARM` `ET_EXEC`; refuses PIE, foreign architectures, truncated images and out-of-range segments by name; covered by 7 in-kernel checks against the real embedded image |
+| ELF32 loader (`kernel/kernel/elf.c`) | ✅ loads, maps and enters a static `EM_ARM` `ET_EXEC`; refuses PIE, foreign architectures, truncated images and out-of-range segments by name; covered by 13 in-kernel checks against the real embedded image - 7 on the header and its refusals, 6 that load it into a real address space and read the program headers back through it |
 | Syscall entry and dispatch (`arch/arm/exception.c`, `kernel/kernel/syscall.c`) | ✅ `svc #0`, number in `r7`, arguments `r0-r5`, result in `r0`, Linux error convention |
 | Implemented syscalls | `write 4`, `read 3`, `exit 1`, `exit_group 248`, `getpid 20`, `getuid 24`, `geteuid 49`, `getgid 47`, `getegid 50`, `brk 45`, `uname 122`, `wait4 114`, `set_tls 0x0f0005` |
 | Unimplemented syscalls | return `-ENOSYS` (38) and are logged once per number, naming the number. They do not kill the caller: a program that gets a proper error is a program we can still learn from |

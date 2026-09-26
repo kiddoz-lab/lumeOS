@@ -198,12 +198,14 @@ A passing run establishes, from the guest's own serial output:
 * the kernel prints `selftest: N/N checks passed` - the physical memory manager,
   the kernel heap, MMU mapping and translation, the system timer, the string
   library, the EABI division helpers, the exception round trip, the ELF loader's
-  validation and the initial-stack/auxv layout all behave as their tests
-  require. The emulator asserts `N == M` *and* that at least 80 checks ran, so
-  the summary line cannot quietly become vacuous. Commit `ed52306` reported
-  `59/59` before the 26 stack and auxiliary-vector checks were added; the count
-  grows with the kernel, and this document only ever states a number together
-  with the commit that showed it;
+  validation, the initial-stack/auxv layout and the address a program is told
+  its own program headers live at all behave as their tests require. The
+  emulator asserts `N == M` *and* that at least 80 checks ran, so the summary
+  line cannot quietly become vacuous. Commit `ed52306` reported `59/59`; the 26
+  stack and auxiliary-vector checks and the 6 that read the loaded image's
+  program headers back through the target address space brought it to `91/91` at
+  `aeb1cb4`. The count grows with the kernel, and this document only ever states a
+  number together with the commit that showed it;
 * the PL011 emits the shell prompt (`lume>`) at the end of a serial log of a few
   kilobytes, so the console, the interrupt path and the receive path are all
   live;
@@ -212,7 +214,10 @@ A passing run establishes, from the guest's own serial output:
 * the user program's own checks pass: it prints `init: auxv verified` only after
   finding the auxiliary vector by walking past `argv` and `envp` (so the `NULL`
   terminators must be there), matching `AT_ENTRY` against the address of its own
-  `_start`, reading `AT_PHDR` back as a valid ELF header whose `e_entry` matches,
+  `_start`, reading the program header table at `AT_PHDR` and finding `AT_ENTRY`
+  inside an executable `PT_LOAD` and `AT_PHDR` itself inside a `PT_LOAD` (the
+  address a program reads its own headers through is the one place where a wrong
+  number is both invisible to the kernel and fatal to the program),
   confirming `AT_HWCAP` has no floating-point bit, and finding 16 non-zero bytes
   at `AT_RANDOM`;
 * the exception history QEMU records during the run is quiet (the count below
@@ -273,7 +278,7 @@ Statements about this project are of two kinds, and the difference is the whole
 point of this document:
 
 * **observed** - a CI run at a named commit reports it. That is what citations
-  like "`59/59` at `ed52306`" mean, and every ✅ in
+  like "`91/91` at `aeb1cb4`" mean, and every ✅ in
   [roadmap.md](roadmap.md) is meant to be one of these;
 * **pending** - the code and its local gates exist, and the emulator run that
   would confirm it has not been read back yet.

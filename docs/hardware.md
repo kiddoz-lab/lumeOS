@@ -191,12 +191,12 @@ main: entering the idle loop
 `kernel/kernel/selftest.c`; `LumeOS: boot complete` and
 `main: entering the idle loop` are the markers the emulator test greps for, so
 they are stable by construction, and so are the `init:` lines - the emulator
-test requires every one of them. The check count grows with the kernel (59 at
-the last run that was read back) and it is asserted too, so the number in a real
-boot log can be compared directly against what CI saw.
+test requires every one of them. The check count grows with the kernel (91 at
+the last run that was read back, `aeb1cb4`) and it is asserted too, so the number in
+a real boot log can be compared directly against what CI saw.
 
 The predictions above are now backed by emulator evidence rather than only by
-reading the code: the boot reaches all four markers, `59/59` self tests pass, the
+reading the code: the boot reaches all four boot markers, `91/91` self tests pass, the
 user program's own output appears and the shell prompt follows it under QEMU (see
 [testing.md](testing.md#what-the-emulator-run-currently-proves)). The lines
 between `selftest:` and `main: entering the idle loop` are the ones that say the
