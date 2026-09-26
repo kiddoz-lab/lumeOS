@@ -20,18 +20,29 @@
 static u32 rng_state;
 static int rng_seeded;
 
+/*
+ * Seeding *replaces* the state: the same argument always produces the same
+ * stream.  That is a deliberate property, not an oversight.  A generator that
+ * mixes the previous state into every seed cannot be tested by asking "seed
+ * with X, take 16 bytes, seed with X again, do you get the same 16 bytes?" -
+ * which is exactly how the self test proves that the bytes AT_RANDOM points at
+ * in a user stack are the generator's output rather than whatever the page
+ * happened to contain.  Callers who want extra entropy pass it in the argument:
+ * rng_ensure_seeded() mixes the microsecond counter, the tick count, the
+ * kernel's load address and the current pid before calling this.
+ */
 void lume_random_seed(u32 entropy)
 {
-    u32 x = rng_state ^ entropy;
+    u32 x = entropy ^ 0x9E3779B9u;
 
     /* A few rounds of the generator itself, plus a multiplication, so that a
-     * caller who seeds with something low-entropy (a tick count, a pid) does
-     * not hand the generator a state with long runs of zero or one bits. */
+     * seed with long runs of zero or one bits (a small tick count, say) still
+     * produces a state with a well-spread bit pattern. */
     x ^= x << 13;
     x ^= x >> 17;
     x ^= x << 5;
-    x *= 0x9E3779B1u;
-    x ^= x >> 15;
+    x *= 0x85EBCA6Bu;
+    x ^= x >> 13;
     rng_state = x ? x : 0x1F123BB5u;   /* xorshift must never hold 0 */
     rng_seeded = 1;
 }
@@ -52,8 +63,9 @@ static void rng_ensure_seeded(void)
     mix ^= (u32)(unsigned long)&rng_state;     /* where the kernel landed in RAM */
     mix ^= p ? p->pid : 0;
 
-    rng_state = mix;
-    lume_random_seed((u32)(us >> 13));
+    /* Two 32-bit words of the counter plus the tick count, the load address and
+     * the pid, folded into the single argument this takes. */
+    lume_random_seed(mix ^ (u32)(us >> 13));
 }
 
 u32 lume_random_u32(void)
