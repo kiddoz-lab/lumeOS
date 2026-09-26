@@ -251,23 +251,51 @@ int elf_load(struct vm_space *as, const u8 *image, u32 size,
     out->segments = segments;
     out->pages = pages;
 
-    /* AT_PHDR: the program headers at the address the program will see them.
-     *
-     * For an image moved by `delta` from the address its own headers claim,
-     * every virtual address in the file is `delta` higher than the file says.
-     * `delta` is derived here from the one address that survives the load - the
-     * entry point the caller is about to jump to - rather than assumed to be
-     * zero, so a future relocation-capable loader does not have to find this
-     * line to stay correct.  For everything this loader accepts today (a
-     * non-PIE image loaded at its link address) delta is 0 and AT_PHDR is the
-     * file offset. */
-    {
-        u32 delta = out->entry - ehdr->e_entry;
-
-        out->phdr = delta + ehdr->e_phoff;
-    }
     out->phnum = ehdr->e_phnum;
     out->phent = ehdr->e_phentsize;
+
+    /*
+     * AT_PHDR: the program headers at the address the *program* will see them.
+     *
+     * A file offset is not an address.  A segment is usually mapped at a
+     * page-aligned offset from its place in the file (the first PT_LOAD of an
+     * image linked at 0x10000 typically lives at file offset 0x1000), so the
+     * address of anything in the file is `file offset - p_offset + p_vaddr` of
+     * the segment that contains it.  Linux does exactly this lookup:
+     *
+     *     if (p_offset <= e_phoff && e_phoff < p_offset + p_filesz)
+     *             phdr_addr = e_phoff - p_offset + p_vaddr;
+     *
+     * The first version of this code used the *entry-point* delta instead, on
+     * the assumption that a file offset and an address are the same number for
+     * an image loaded at its link address.  They are not: it advertised
+     * AT_PHDR = 0x34, which is the null page, and the first program that read
+     * its own headers died with SIGSEGV - caught by the program's own check in
+     * QEMU, and now by the self test below, which requires the address to be
+     * inside a mapped segment.
+     *
+     * If no segment contains the program headers they are not in memory at all,
+     * and the address stays 0 - the convention the auxiliary vector uses for
+     * "not available".  A program that needs them treats it as such instead of
+     * following a pointer into nothing.
+     */
+    {
+        const struct elf32_ehdr *eh = ehdr;
+        u32 phdr = 0;
+
+        for (u16 i = 0; i < eh->e_phnum; i++) {
+            const struct elf32_phdr *ph = phdr_at(image, eh, i);
+
+            if (!ph || ph->p_type != ELF_PT_LOAD)
+                continue;
+            if (ph->p_offset <= eh->e_phoff &&
+                eh->e_phoff < ph->p_offset + ph->p_filesz) {
+                phdr = eh->e_phoff - ph->p_offset + ph->p_vaddr;
+                break;
+            }
+        }
+        out->phdr = phdr;
+    }
     return 0;
 
 fail:

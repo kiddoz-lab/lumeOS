@@ -314,6 +314,75 @@ static void test_elf(void)
         check("elf: a truncated image is refused",
               elf_validate(lume_init_elf, 32, NULL, &reason) < 0);
     }
+
+    /* Loading it for real, into a real address space, and checking the one
+     * number a program is handed that is *not* in its own image: AT_PHDR.
+     *
+     * This is where a quiet mistake lives.  The headers are at a file offset,
+     * and an address is that offset minus the containing segment's file offset
+     * plus its virtual address - not the entry point, and not the file offset
+     * itself.  Advertising 0x34 (the null page) booted a kernel that looked
+     * perfect and killed the first program to read its own headers, so the
+     * address is now checked by reading it back through the target space. */
+    {
+        struct vm_space *as = vmm_space_create();
+        struct elf_image image;
+
+        check("elf: address space for the load", as != NULL);
+        if (as && elf_load(as, lume_init_elf, lume_init_elf_size, &image) == 0) {
+            u8 magic[4] = { 0, 0, 0, 0 };
+            u32 pa = 0;
+
+            check("elf: AT_PHDR is a mapped address",
+                  image.phdr != 0 && vmm_translate(as, image.phdr, &pa) == 0);
+
+            /* The table at AT_PHDR must describe the entry point we advertise:
+             * one of its PT_LOAD segments has to be executable and contain
+             * e_entry, or a program's startup code would go looking for its
+             * TLS block in the wrong place.  Reading it through the target
+             * address space also proves the address is the *one the program
+             * will use*, not merely a plausible file offset. */
+            copy_from_user_as(as, magic, (void *)image.phdr, 4);
+            check("elf: AT_PHDR reads back as a program header table",
+                  magic[3] == 0 && magic[2] == 0 &&   /* p_type fits in 2 bytes */
+                  (magic[0] == ELF_PT_LOAD || magic[0] == 6 /* PT_PHDR */));
+
+            {
+                u8 phdr_buf[32 * 8];
+                u32 entries = image.phnum > ARRAY_SIZE(phdr_buf) / 32
+                                  ? ARRAY_SIZE(phdr_buf) / 32 : image.phnum;
+                int in_exec = 0, phdr_in_load = 0;
+
+                if (copy_from_user_as(as, phdr_buf, (void *)image.phdr,
+                                      entries * 32) == 0) {
+                    for (u32 i = 0; i < entries; i++) {
+                        const struct elf32_phdr *ph =
+                            (const struct elf32_phdr *)(phdr_buf + i * 32);
+
+                        if (ph->p_type != ELF_PT_LOAD)
+                            continue;
+                        if ((ph->p_flags & ELF_PF_X) &&
+                            image.entry >= ph->p_vaddr &&
+                            image.entry < ph->p_vaddr + ph->p_memsz)
+                            in_exec = 1;
+                        if (image.phdr >= ph->p_vaddr &&
+                            image.phdr < ph->p_vaddr + ph->p_memsz)
+                            phdr_in_load = 1;
+                    }
+                }
+                check("elf: the headers put AT_ENTRY in an executable segment",
+                      in_exec == 1);
+                check("elf: the headers put AT_PHDR inside a PT_LOAD",
+                      phdr_in_load == 1);
+            }
+            check("elf: AT_PHNUM and AT_PHENT describe the table",
+                  image.phnum > 0 && image.phent == sizeof(struct elf32_phdr));
+        } else {
+            check("elf: loads into an address space", 0);
+        }
+        if (as)
+            vmm_space_destroy(as);
+    }
 }
 
 

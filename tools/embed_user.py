@@ -29,6 +29,7 @@ ELF_MAGIC = b"\x7fELF"
 EM_ARM = 40
 ET_EXEC = 2
 ELFCLASS32 = 1
+PT_LOAD = 1
 
 
 def check_elf(image: bytes, path: Path) -> tuple[int, int]:
@@ -57,7 +58,61 @@ def check_elf(image: bytes, path: Path) -> tuple[int, int]:
     if e_entry < 0x1000:
         raise SystemExit(f"embed_user: {path}: entry 0x{e_entry:08x} is inside the "
                          "null page; user programs must be linked above it")
+
+    check_phdrs(image, path, e_entry)
     return e_entry, e_machine
+
+
+def check_phdrs(image: bytes, path: Path, e_entry: int) -> None:
+    """The program headers have to be mapped, or AT_PHDR has no value.
+
+    A program is told where its own program headers are by AT_PHDR, and the
+    kernel computes that address the way Linux does: find the PT_LOAD whose file
+    range contains e_phoff, and report `e_phoff - p_offset + p_vaddr`.  If no
+    segment contains them, the headers are not in memory at all and AT_PHDR has
+    to be 0 - which a C library cannot work with, since reading the headers is
+    how it finds PT_TLS and PT_GNU_RELRO before it runs a line of the program.
+
+    This is checked here because it is a property of the *linker script*, it is
+    invisible in a listing (`readelf -l` happily shows three clean segments),
+    and getting it wrong produces a kernel that boots and then kills the first
+    program to look at its own headers.  It happened once: the text segment
+    started at file offset 0x1000 with the headers unmapped, AT_PHDR came out as
+    0x34, and init died with SIGSEGV before printing anything.
+    """
+    e_phoff, = struct.unpack_from("<I", image, 28)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", image, 42)
+    if e_phentsize != 32 or e_phnum == 0:
+        raise SystemExit(f"embed_user: {path}: e_phentsize={e_phentsize}, "
+                         f"e_phnum={e_phnum}; the kernel reads 32-byte phdrs")
+    if e_phoff + e_phnum * e_phentsize > len(image):
+        raise SystemExit(f"embed_user: {path}: the program header table "
+                         f"(0x{e_phoff:x}, {e_phnum} entries) runs past the file")
+
+    phdr_addr = None
+    entry_seg = None
+    for i in range(e_phnum):
+        p_type, p_offset, p_vaddr, _p_paddr, p_filesz, p_memsz, p_flags, _p_align = \
+            struct.unpack_from("<8I", image, e_phoff + i * 32)
+        if p_type != PT_LOAD:
+            continue
+        if p_offset <= e_phoff < p_offset + p_filesz:
+            phdr_addr = e_phoff - p_offset + p_vaddr
+        if p_vaddr <= e_entry < p_vaddr + p_memsz:
+            entry_seg = (p_vaddr, p_memsz, p_flags)
+
+    if phdr_addr is None:
+        raise SystemExit(f"embed_user: {path}: no PT_LOAD segment contains the "
+                         f"program headers (e_phoff=0x{e_phoff:x}); AT_PHDR would "
+                         "be 0 and a C library could not start - check the linker "
+                         "script, the first PT_LOAD needs FILEHDR PHDRS and the "
+                         "text must start at the load address plus SIZEOF_HEADERS")
+    if entry_seg is None:
+        raise SystemExit(f"embed_user: {path}: the entry point 0x{e_entry:08x} is "
+                         "not inside any PT_LOAD segment")
+    if not entry_seg[2] & 1:
+        raise SystemExit(f"embed_user: {path}: the entry point 0x{e_entry:08x} is "
+                         f"not in an executable segment (p_flags={entry_seg[2]})")
 
 
 def main(argv: list[str]) -> int:

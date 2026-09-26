@@ -17,12 +17,18 @@ The first program (`userspace/init/main.c`) prints this, and CI asserts every
 line of it:
 
 ```
-init: loading the embedded 25504-byte init image (entry 0x00010000, sha256 ...)
-init: entering user mode at 0x00010000 on stack 0xbdffffe4 (1 segments, 1 pages)
+init: loading the embedded 28244-byte init image (entry 0x000100b4, sha256 ...)
+init: stack at 0xbdffff20..0xbe000000 (2 pages, 224 bytes: argc/argv/envp + 17 auxv entries)
+init: auxv AT_PAGESZ 4096, AT_ENTRY 0x000100b4, AT_PHDR 0x00010034, AT_PHNUM 3, AT_HWCAP 0x00008097, AT_CLKTCK 100
+init: entering user mode at 0x000100b4 on stack 0xbdffff20
 init: hello from user mode
 init: pid 1, argc 1
 init: argv[0] is "/bin/init"
 init: this line went to file descriptor 2
+init: auxv at 0xbdffff30: AT_PAGESZ 4096, AT_ENTRY 0x000100b4, AT_PHDR 0x00010034, AT_PHNUM 3, AT_HWCAP 0x00008097, AT_CLKTCK 100
+init: auxv AT_PHNUM 3 headers, 2 PT_LOAD, AT_PHDR 0x00010034 (in a segment), entry is executable
+init: auxv AT_RANDOM 16 bytes, seed byte 0xNN (not all zero)
+init: auxv verified
 init: exiting with status 0
 init: pid 1 exited with status 0 (exit code 0)
 ```
@@ -160,10 +166,10 @@ What LumeOS writes into `auxv` today:
 | `AT_HWCAP` | `0x00008097` | what the CPU may be asked to do - see below |
 | `AT_PAGESZ` | `4096` | `PAGE_SIZE`; memory mapping arithmetic starts here |
 | `AT_CLKTCK` | `100` | what `times(2)` counts in (Linux's `USER_HZ`, and our `LUME_HZ`) |
-| `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` | `0x00010034`, `32`, `3` | the program's own headers, so a libc can find `PT_GNU_STACK` without opening a file it may not have |
+| `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` | `0x00010034`, `32`, `3` | where the program's own header *table* is, so a libc can find `PT_TLS`, `PT_GNU_RELRO` and `PT_GNU_STACK` without opening a file it may not have |
 | `AT_BASE` | `0` | the interpreter's address: there is no dynamic linker, and this is how a static program says so |
 | `AT_FLAGS` | `0` | nothing set, nothing reserved |
-| `AT_ENTRY` | `0x00010000` | where the program started |
+| `AT_ENTRY` | `0x000100b4` | where the program started (the entry the loader was given, not a number the stack builder guesses) |
 | `AT_UID`/`AT_EUID`/`AT_GID`/`AT_EGID` | the process's ids | `0` today (no filesystem, no `setuid`), but read from the process, not hardcoded |
 | `AT_SECURE` | `0` | no privilege boundary has been crossed, so nothing needs to be distrusted |
 | `AT_RANDOM` | 16 bytes on the stack | the C library's stack canary seed |
@@ -201,6 +207,16 @@ call cryptographic entropy - an attacker who learns one process's canary can
 predict the next one's. The fix is a real source, and the BCM2835 has one (a
 hardware RNG at `0x20104000`, which QEMU models); driving it is a listed task in
 [roadmap.md](roadmap.md) rather than a claim made here.
+
+Seeding *replaces* the state rather than mixing into it, so the same seed
+replays the same stream. That is a deliberate property with a test behind it:
+the self test seeds the generator, records 16 bytes, reseeds with the same
+value, and compares - which is how it proves that the bytes `AT_RANDOM` points
+at in real user memory are the generator's output and not whatever the page
+happened to contain. A generator that folded the previous state into every seed
+could not be checked that way. Callers who want more entropy pass it in the
+seed: `lume_random_init()` mixes the microsecond counter, the tick count, the
+kernel's load address and the pid across two calls.
 
 ---
 
@@ -277,7 +293,8 @@ one `PT_INTERP` (the dynamic loader) or none (static). The loader's job:
    forget and produces "the right bytes, the wrong instruction" bugs);
 3. build the initial stack: `argc`, `argv[]`, `NULL`, `envp[]`, `NULL`,
    `auxv[]` (`AT_PAGESZ`, `AT_HWCAP`, `AT_ENTRY`, `AT_PHDR`, `AT_RANDOM`, ...),
-   with `sp` 8-byte aligned as the EABI requires;
+   with `sp` rounded to 16 bytes - the EABI needs 8, Linux rounds to 16, and
+   some C runtimes assume it;
 4. map the program's `brk` base right after its last segment
    (`LUME_USER_BRK_BASE` is `0x00100000`; the real value comes from the loaded
    image), the mmap region from `LUME_USER_MMAP_BASE` (`0x40000000`) and the
@@ -297,11 +314,42 @@ refusals it makes by name:
 | Coherence | the data cache is cleaned and the instruction cache invalidated for the mapped range - ARMv6 has separate I and D caches, and without this the CPU can execute whatever the I-cache held for that physical page |
 | Failure | a failed load unmaps and frees everything it mapped, so the caller cannot leak a half-loaded image |
 
-`ET_DYN` (PIE), `PT_INTERP` (dynamic linking), `auxv` and `exec()` come after the
-static case works end to end: PIE needs relocation processing, and the dynamic
-loader needs a filesystem to read from. What a program may assume *today* is
-`argc`/`argv` on a valid stack and nothing else - in particular there is **no
-`auxv`**, which is why a glibc binary will not start yet (see §5).
+`ET_DYN` (PIE), `PT_INTERP` (dynamic linking) and `exec()` come after the static
+case works end to end: PIE needs relocation processing, and the dynamic loader
+needs a filesystem to read from.
+
+### One thing the loader requires of the image: the headers must be mapped
+
+`AT_PHDR` is not a file offset. A program is handed *an address* and told it
+points at its own program header table, and the loader computes it the way Linux
+does: find the `PT_LOAD` whose file range contains `e_phoff` and report
+
+```
+AT_PHDR = e_phoff - p_offset + p_vaddr        (of that segment)
+```
+
+If no segment contains the headers they are not in memory at all, and the honest
+value is `0` - the convention for "this is not available". That is a state a C
+library cannot start in, because reading the program headers is how it finds
+`PT_TLS`, `PT_GNU_RELRO` and `PT_GNU_STACK` before it runs a line of the
+program.
+
+So the userspace linker script has to put the headers inside the first segment,
+which is what `userspace/init/linker.ld` does with `FILEHDR PHDRS` on the text
+segment and `. = 0x00010000 + SIZEOF_HEADERS`. This is not obvious, it is
+invisible in `readelf -l` output, and getting it wrong is how init first died:
+the text segment began at file offset `0x1000` with the headers unmapped, the
+kernel dutifully reported `AT_PHDR = 0x00000034` (the null page), and the
+program that went to read its own headers was killed by the SIGSEGV handler it
+did not have. Three things now stand in the way of a repeat, at three different
+costs: `tools/embed_user.py` refuses such an image at build time, the kernel
+self test loads the image and reads the table back through the target address
+space, and `init` itself checks that `AT_PHDR` lies inside a `PT_LOAD` and that
+`AT_ENTRY` lies inside one marked executable.
+
+What a program may assume *today*: `argc`/`argv`/`envp`, the auxiliary vector
+above, and `sp` 16-byte aligned at entry. There is still no `PT_INTERP` handling,
+so a dynamically linked binary does not start (§5).
 
 ---
 

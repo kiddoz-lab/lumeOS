@@ -26,9 +26,19 @@ sys.path.insert(0, str(REPO / "tools"))
 import embed_user  # noqa: E402
 
 
-def make_elf(*, machine: int = 40, etype: int = 2, entry: int = 0x00010000,
-             elfclass: int = 1, endian: int = 1, magic: bytes = b"\x7fELF") -> bytes:
-    """A minimal but structurally complete ELF32 header + one PT_LOAD."""
+def make_elf(*, machine: int = 40, etype: int = 2, entry: int | None = None,
+             elfclass: int = 1, endian: int = 1, magic: bytes = b"\x7fELF",
+             ph_offset: int = 0, ph_vaddr: int = 0x00010000,
+             filesz: int | None = None, flags: int = 5) -> bytes:
+    """A minimal but structurally complete ELF32 header + one PT_LOAD.
+
+    The default shape is the one a real image has: one PT_LOAD starting at file
+    offset 0 whose virtual address is the link address, with the ELF header and
+    the program header table *inside* it.  That containment is what makes
+    AT_PHDR computable - see check_phdrs() - so the arguments exist to break it
+    on purpose (`ph_offset`/`filesz` move the segment off the headers) and to
+    build an image whose entry point is not where the segments say it is.
+    """
     ehdr = bytearray(52)
     ehdr[0:4] = magic
     ehdr[4] = elfclass
@@ -36,16 +46,21 @@ def make_elf(*, machine: int = 40, etype: int = 2, entry: int = 0x00010000,
     ehdr[6] = 1                      # EI_VERSION
     struct.pack_into("<HH", ehdr, 16, etype, machine)
     struct.pack_into("<I", ehdr, 20, 1)          # e_version
-    struct.pack_into("<I", ehdr, 24, entry)      # e_entry
     struct.pack_into("<I", ehdr, 28, 52)         # e_phoff
     struct.pack_into("<I", ehdr, 32, 0)          # e_shoff
-    struct.pack_into("<I", ehdr, 36, 0x05000200) # e_flags (EABI5 | hard-float off)
+    struct.pack_into("<I", ehdr, 36, 0x05000200) # e_flags (EABI5, soft float)
     struct.pack_into("<H", ehdr, 40, 52)         # e_ehsize
     struct.pack_into("<H", ehdr, 42, 32)         # e_phentsize
     struct.pack_into("<H", ehdr, 44, 1)          # e_phnum
-    phdr = struct.pack("<IIIIIIII", 1, 0x1000, 0x00010000, 0x00010000,
-                       16, 16, 5, 0x1000)
-    return bytes(ehdr) + phdr + b"\x00" * 8
+    if filesz is None:
+        filesz = 52 + 32 + 32                    # headers + a little code
+    if entry is None:
+        entry = ph_vaddr + 52 + 32               # just past the headers
+    struct.pack_into("<I", ehdr, 24, entry)      # e_entry
+    phdr = struct.pack("<IIIIIIII", 1, ph_offset, ph_vaddr, ph_vaddr,
+                       filesz, filesz, flags, 0x1000)
+    body = bytes(ehdr) + phdr
+    return body + b"\x00" * max(0, filesz - len(body))
 
 
 class EmbedUserTests(unittest.TestCase):
@@ -69,7 +84,7 @@ class EmbedUserTests(unittest.TestCase):
         self.assertIn("const u8 test_blob[]", text)
         self.assertIn("test_blob_size", text)
         self.assertIn("test_blob_entry", text)
-        self.assertIn("0x00010000", text)
+        self.assertIn("0x00010054", text)   # just past the headers
 
     def test_blob_bytes_match_the_input(self):
         image = make_elf()
@@ -110,6 +125,29 @@ class EmbedUserTests(unittest.TestCase):
         rc, text = self.write_and_run(make_elf(entry=0x00000010))
         self.assertNotEqual(rc, 0)
         self.assertIn("null page", text)
+
+    def test_rejects_headers_that_no_segment_maps(self):
+        # The regression that motivated the check: a linker script whose text
+        # segment starts at file offset 0x1000 leaves the program headers
+        # unmapped, so AT_PHDR has no value a program could use.
+        rc, text = self.write_and_run(make_elf(ph_offset=0x1000, filesz=0x100))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no PT_LOAD segment contains the program headers", text)
+
+    def test_rejects_an_entry_outside_every_segment(self):
+        rc, text = self.write_and_run(make_elf(entry=0x00020000))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("not inside any PT_LOAD", text)
+
+    def test_rejects_an_entry_in_a_non_executable_segment(self):
+        rc, text = self.write_and_run(make_elf(flags=4))   # R only
+        self.assertNotEqual(rc, 0)
+        self.assertIn("not in an executable segment", text)
+
+    def test_rejects_a_header_table_that_runs_past_the_file(self):
+        rc, text = self.write_and_run(make_elf()[:60])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("runs past the file", text)
 
     def test_digest_is_of_the_whole_image(self):
         image = make_elf()

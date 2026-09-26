@@ -107,6 +107,13 @@ static u32 auxv_get(const u32 *auxv, u32 type, u32 fallback)
     return fallback;
 }
 
+/* Read a 32-bit little-endian field: the program headers are a file format,
+ * not a C structure, and this program must not assume the compiler's packing. */
+static u32 le32(const unsigned char *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
 static int bytes_are_zero(const unsigned char *p, u32len n)
 {
     for (u32len i = 0; i < n; i++)
@@ -196,20 +203,51 @@ int main(int argc, char **argv)
         ok &= (clktck == 100);
         ok &= ((hwcap & LUME_HWCAP_VFP) == 0);   /* soft-float build only */
 
-        /* AT_PHDR must address this program's own ELF header.  Read it and
-         * check the magic and that the entry inside it is the entry we were
-         * started at - two independent facts, both from the image itself. */
+        /*
+         * AT_PHDR addresses the program header *table*, not the ELF header
+         * (the headers live at AT_PHDR - e_phoff, which a program does not
+         * need to know: everything it wants is in the table).  So read the
+         * table and check the two things it has to agree with: that the entry
+         * point the kernel jumped to lies inside a PT_LOAD that is marked
+         * executable, and that AT_PHDR itself lies inside a PT_LOAD - which is
+         * the same containment rule the kernel used to compute it.
+         *
+         * This is the check a C library's startup code makes implicitly: if
+         * AT_PHDR or AT_ENTRY were even slightly wrong, the first thing glibc
+         * does with them (find PT_TLS, PT_GNU_RELRO, PT_GNU_STACK) reads
+         * something unrelated or faults.
+         */
         if (phdr && phnum) {
-            const unsigned char *h = (const unsigned char *)phdr;
-            u32 header_entry;
+            const unsigned char *ph = (const unsigned char *)phdr;
+            u32 i;
+            int entry_in_exec = 0, phdr_in_segment = 0, loads = 0;
 
-            ok &= (h[0] == 0x7F && h[1] == 'E' && h[2] == 'L' && h[3] == 'F');
-            header_entry = (u32)h[24] | ((u32)h[25] << 8) |
-                           ((u32)h[26] << 16) | ((u32)h[27] << 24);
-            ok &= (header_entry == entry);
-            puts_fd(1, "init: auxv AT_PHDR reads back as ELF, e_entry ");
-            put_hex(1, header_entry);
-            puts_fd(1, "\n");
+            for (i = 0; i < phnum; i++) {
+                const unsigned char *e = ph + i * 32;
+                u32 p_type = le32(e + 0);
+                u32 p_vaddr = le32(e + 8);
+                u32 p_memsz = le32(e + 20);
+                u32 p_flags = le32(e + 24);
+
+                if (p_type != 1)          /* PT_LOAD */
+                    continue;
+                loads++;
+                if ((p_flags & 1) && entry >= p_vaddr && entry < p_vaddr + p_memsz)
+                    entry_in_exec = 1;
+                if (phdr >= p_vaddr && phdr < p_vaddr + p_memsz)
+                    phdr_in_segment = 1;
+            }
+
+            ok &= (loads > 0) && entry_in_exec && phdr_in_segment;
+            puts_fd(1, "init: auxv AT_PHNUM ");
+            put_dec(1, phnum);
+            puts_fd(1, " headers, ");
+            put_dec(1, (u32)loads);
+            puts_fd(1, " PT_LOAD, AT_PHDR ");
+            put_hex(1, phdr);
+            puts_fd(1, phdr_in_segment ? " (in a segment), " : " (NOT in a segment), ");
+            puts_fd(1, entry_in_exec ? "entry is executable\n"
+                                     : "ENTRY IS NOT IN AN EXECUTABLE SEGMENT\n");
         } else {
             ok = 0;
         }

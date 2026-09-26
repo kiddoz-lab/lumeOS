@@ -170,16 +170,16 @@ memory: 448 MiB RAM at 0x00000000, ... KiB free after reservations
 selftest: running kernel self tests
 selftest: N/N checks passed
 LumeOS: boot complete, ... KiB free, ... timer ticks
-init: loading the embedded NNNNN-byte init image (entry 0x00010000, sha256 ...)
+init: loading the embedded NNNNN-byte init image (entry 0x000100b4, sha256 ...)
 init: stack at 0xbdffff20..0xbe000000 (2 pages, 224 bytes: argc/argv/envp + 17 auxv entries)
-init: auxv AT_PAGESZ 4096, AT_ENTRY 0x00010000, AT_PHDR 0x00010034, AT_PHNUM 3, AT_HWCAP 0x00008097, AT_CLKTCK 100
-init: entering user mode at 0x00010000 on stack 0xbdffff20
+init: auxv AT_PAGESZ 4096, AT_ENTRY 0x000100b4, AT_PHDR 0x00010034, AT_PHNUM 3, AT_HWCAP 0x00008097, AT_CLKTCK 100
+init: entering user mode at 0x000100b4 on stack 0xbdffff20
 init: hello from user mode
 init: pid 1, argc 1
 init: argv[0] is "/bin/init"
 init: this line went to file descriptor 2
-init: auxv at 0xbdffff30: AT_PAGESZ 4096, AT_ENTRY 0x00010000, AT_PHDR 0x00010034, AT_PHNUM 3, AT_HWCAP 0x00008097, AT_CLKTCK 100
-init: auxv AT_PHDR reads back as ELF, e_entry 0x00010000
+init: auxv at 0xbdffff30: AT_PAGESZ 4096, AT_ENTRY 0x000100b4, AT_PHDR 0x00010034, AT_PHNUM 3, AT_HWCAP 0x00008097, AT_CLKTCK 100
+init: auxv AT_PHNUM 3 headers, 2 PT_LOAD, AT_PHDR 0x00010034 (in a segment), entry is executable
 init: auxv AT_RANDOM 16 bytes, seed byte 0xNN (not all zero)
 init: auxv verified
 init: exiting with status 0
