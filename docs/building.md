@@ -200,6 +200,21 @@ helper legitimately defines none of the six, and the linker is what guarantees
 closure there. If such a program ever *does* define one, its layout is checked
 like the kernel's.
 
+### `tools/md2html.py` - reading the documentation
+
+```sh
+python3 tools/md2html.py --all build/docs-view   # README.md + every docs/*.md
+python3 -m http.server 8000 --directory build/docs-view
+```
+
+The documents in `docs/` are the project's record, and reading them should not
+depend on having a Markdown renderer or on a viewer whose theme happens to put
+dark text on a light background. This script turns them into self-contained HTML
+with the colours spelled out, and it depends on nothing but the Python standard
+library - no `pip install`, no network - because the machine that needs it is
+often the one where installing things is the problem. It is a documentation tool
+and never runs in CI or in the build.
+
 ---
 
 ## 5. Building the SD card image
