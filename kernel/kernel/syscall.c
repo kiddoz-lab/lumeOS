@@ -42,6 +42,12 @@
  * range validation happens per piece. */
 #define SYSCALL_COPY_CHUNK 256
 
+/* writev(2) bounds.  Linux allows 1024 iovecs and a 2 MiB total; the console
+ * cannot absorb that and the kernel is single-threaded, so the limits are small
+ * enough to bound the time one call can spend and generous enough that a libc's
+ * stdio never notices them (it uses two or three). */
+#define SYSCALL_WRITEV_MAX_BYTES  (64u * 1024u)
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
@@ -65,6 +71,45 @@ static struct process *caller_process(struct trapframe *tf)
     return proc_current();
 }
 
+/*
+ * One range of user memory to one file descriptor.
+ *
+ * Copy and write in chunks: the user buffer may straddle pages, and the write
+ * side (a device) may accept partial writes.  `done_io` carries the count of
+ * bytes already written by earlier calls, so a short write or a fault in a
+ * later range still reports what did go through - a program that sees a short
+ * count retries, which is the behaviour every libc expects.
+ */
+static int fd_write_user(struct process *p, struct file *f, u32 user_buf, u32 len,
+                         u32 *done_io)
+{
+    char chunk[SYSCALL_COPY_CHUNK];
+    u32 done = 0;
+
+    while (done < len) {
+        u32 n = len - done;
+        int written;
+
+        if (n > sizeof(chunk))
+            n = sizeof(chunk);
+        if (copy_from_user(chunk, (const void *)(user_buf + done), n) < 0) {
+            *done_io += done;
+            return done ? (int)(*done_io) : -EFAULT;
+        }
+        written = f->node->ops->write(f->node, f->offset, chunk, n);
+        if (written < 0) {
+            *done_io += done;
+            return done ? (int)(*done_io) : written;
+        }
+        f->offset += (u32)written;
+        done += (u32)written;
+        if ((u32)written < n)
+            break;   /* short write: report what went through */
+    }
+    *done_io += done;
+    return (int)*done_io;
+}
+
 static int sys_write(struct trapframe *tf)
 {
     int fd = (int)tf->r[0];
@@ -72,35 +117,73 @@ static int sys_write(struct trapframe *tf)
     u32 len = tf->r[2];
     struct process *p = caller_process(tf);
     struct file *f;
-    char chunk[SYSCALL_COPY_CHUNK];
     u32 done = 0;
 
     f = fd_get(p, fd);
     if (!f || !f->node || !f->node->ops || !f->node->ops->write)
         return -EBADF;
-
     if (len == 0)
         return 0;
+    return fd_write_user(p, f, user_buf, len, &done);
+}
 
-    /* Copy and write in chunks: the user buffer may straddle pages, and the
-     * write side (a device) may accept partial writes. */
-    while (done < len) {
-        u32 n = len - done;
+/*
+ * writev(2) - a vector of buffers to one descriptor.
+ *
+ * This is not a convenience wrapper: musl's stdio writes *through* writev
+ * (`src/stdio/__stdio_write.c`), so without it a program built against a real C
+ * library produces no output at all, and printf does not fail loudly - it
+ * buffers, the flush returns an error nobody reads, and the process exits 0
+ * with an empty console.  That is a specific enough failure to be worth naming
+ * here, because "the program ran and printed nothing" is otherwise a mystery.
+ *
+ * The kernel copies each iovec out of user memory itself (see sys_write) so a
+ * buffer that straddles a page boundary or an iovec pointing at unmapped memory
+ * is refused, not followed.  Linux would write the ranges straight from user
+ * memory; copying is the difference between a buffer that is validated and one
+ * that is trusted, and on this kernel the console is not fast enough to care.
+ */
+static int sys_writev(struct trapframe *tf)
+{
+    int fd = (int)tf->r[0];
+    u32 user_iov = tf->r[1];
+    int count = (int)tf->r[2];
+    struct process *p = caller_process(tf);
+    struct file *f;
+    u32 done = 0;
+    u32 total = 0;
 
-        if (n > sizeof(chunk))
-            n = sizeof(chunk);
-        if (copy_from_user(chunk, (const void *)(user_buf + done), n) < 0)
+    f = fd_get(p, fd);
+    if (!f || !f->node || !f->node->ops || !f->node->ops->write)
+        return -EBADF;
+    if (count < 0)
+        return -EINVAL;
+    if (count == 0)
+        return 0;
+    if (count > LUME_IOV_MAX)
+        return -EINVAL;
+
+    for (int i = 0; i < count; i++) {
+        struct lume_iovec iov;
+        int rc;
+
+        if (copy_from_user(&iov, (const void *)(user_iov + (u32)i * sizeof(iov)),
+                           sizeof(iov)) < 0) {
+            done += total;
             return done ? (int)done : -EFAULT;
-        {
-            int written = f->node->ops->write(f->node, f->offset, chunk, n);
-
-            if (written < 0)
-                return done ? (int)done : written;
-            f->offset += (u32)written;
-            done += (u32)written;
-            if ((u32)written < n)
-                break;   /* short write: report what went through */
         }
+        if (iov.len == 0)
+            continue;
+        if (total + iov.len > SYSCALL_WRITEV_MAX_BYTES) {
+            done += total;
+            return done ? (int)done : -EINVAL;
+        }
+        total += iov.len;
+        rc = fd_write_user(p, f, iov.base, iov.len, &done);
+        if (rc < 0)
+            return rc;
+        if ((u32)rc < total)   /* short write: stop, report what went through */
+            break;
     }
     return (int)done;
 }
@@ -257,6 +340,8 @@ int syscall_implemented(u32 nr)
     case LUME_NR_brk:
     case LUME_NR_uname:
     case LUME_NR_wait4:
+    case LUME_NR_writev:
+    case LUME_NR_set_tid_address:
     case LUME_NR_set_tls:
         return 1;
     default:
@@ -295,6 +380,22 @@ void syscall_dispatch(struct trapframe *tf)
     case LUME_NR_wait4:
         tf->r[0] = (u32)sys_wait4(tf);
         return;
+    case LUME_NR_writev:
+        tf->r[0] = (u32)sys_writev(tf);
+        return;
+    case LUME_NR_set_tid_address: {
+        /* The kernel picks the pid, so the argument is only the address a
+         * thread's exit should clear - which belongs to futexes and threads,
+         * neither of which exists yet.  What a caller observes today is the
+         * return value, and that is the pid, as on Linux. */
+        struct process *p = caller_process(tf);
+
+        if (!p)
+            return;
+        p->clear_child_tid = tf->r[0];
+        tf->r[0] = p->pid;
+        return;
+    }
     case LUME_NR_set_tls: {
         struct process *p = caller_process(tf);
 

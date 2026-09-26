@@ -51,6 +51,12 @@ jobs:
             echo "python3-capstone unavailable, falling back to pip"
             python3 -m pip install --break-system-packages capstone
           fi
+          # The second user program is linked against musl, which needs a
+          # compiler that can target Linux rather than bare metal.  zig ships
+          # musl's source and builds it during the link, so one pinned wheel
+          # replaces a cross-toolchain: no sysroot to assemble, no libc to
+          # fetch at build time, and the same version everywhere.
+          python3 -m pip install --break-system-packages ziglang==${LUME_ZIGLANG_VERSION:-0.16.0}
 
       - name: Report tool versions
         run: |
@@ -60,6 +66,8 @@ jobs:
           python3 --version
           python3 -c 'import capstone; print("capstone", capstone.__version__)'
           qemu-system-arm --version | head -1
+          python3 -c 'import os, ziglang; print("zig", floor := os.path.join(os.path.dirname(ziglang.__file__), "zig"))'
+          "$(python3 -c 'import os, ziglang; print(os.path.join(os.path.dirname(ziglang.__file__), "zig"))')" version
 
       - name: Build the kernel (build/kernel.img)
         run: |

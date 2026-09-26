@@ -45,9 +45,21 @@ ALLOWED_CPU_ARCH = {
 }
 
 # Mnemonics that do not exist on ARMv6, or that only exist in their ARMv7 form.
+#
+# The byte, halfword and doubleword exclusive accesses are *not* on this list.
+# They are ARMv6K, and the ARM1176JZF-S in a BCM2835 is ARMv6Z - which the
+# ACLE table spells out by listing "Arm1176JZ-S" as an example of an
+# Armv6Z (Armv6K with Security Extensions) core, and which the build
+# attributes of every image this project builds report as Tag_CPU_arch v6KZ.
+# Refusing them (as an earlier version of this list did, on a misreading of
+# "ARMv6" as the whole family) rejected correct code: LLVM emits LDREXB/STREXB
+# for a single-byte compare-and-swap on this CPU, and musl's own startup uses
+# exactly that through its atomics.
+ARMV6K_EXCLUSIVES = ("ldrexb", "ldrexh", "ldrexd", "strexb", "strexh",
+                     "strexd", "clrex")
+
 ARMV7_ONLY = {
-    "sdiv", "udiv", "clrex", "dmb", "dsb", "isb", "sev", "wfe", "pldw",
-    "ldrexb", "ldrexh", "ldrexd", "strexb", "strexh", "strexd",
+    "sdiv", "udiv", "dmb", "dsb", "isb", "sev", "wfe", "pldw",
     "bfc", "bfi", "sbfx", "ubfx",
     "cbz", "cbnz", "tbb", "tbh", "rev16", "revsh",
     "movw", "movt", "lda", "ldab", "ldah", "ldaex", "stl", "stlb", "stlh",
@@ -72,7 +84,14 @@ FORBIDDEN_CPU_NAME = re.compile(
 
 # The ARMv7 barrier/hint mnemonics double as CP15 instruction names in ARMv6
 # disassemblers; report them with the ARMv6 alternative spelled out.
-BARRIER_HINTS = ("dmb", "dsb", "isb", "wfe", "sev", "clrex")
+# Barrier and hint mnemonics whose ARMv6 spelling is a CP15 instruction, so that
+# the useful message is "use the CP15 form" rather than "this does not exist".
+#
+# CLREX is deliberately not here: the Clear-Exclusive instruction arrived with
+# ARMv6K (it is one of the K extensions), so on an ARM1176JZF-S it is legal and
+# reporting it as ARMv7-only would be wrong.  (It is also in ARMV6K_EXCLUSIVES
+# above, which is what the tests hold me to.)
+BARRIER_HINTS = ("dmb", "dsb", "isb", "wfe", "sev")
 
 
 class CheckError(Exception):
@@ -122,27 +141,35 @@ def sections(path: Path) -> list[tuple[str, int, int, int]]:
     result = []
     for i in range(e_shnum):
         off = e_shoff + i * e_shentsize
-        name_off, sh_type, sh_flags, _addr, sh_off, sh_size = struct.unpack_from(
+        name_off, sh_type, sh_flags, sh_addr, sh_off, sh_size = struct.unpack_from(
             "<IIIIII", data, off)
         name = shstr[name_off:shstr.find(b"\0", name_off)].decode("ascii", "replace")
-        result.append((name, sh_type, sh_flags, sh_off, sh_size))
+        result.append((name, sh_type, sh_flags, sh_addr, sh_off, sh_size))
     return result
 
 
 def executable_sections(path: Path) -> list[tuple[int, bytes]]:
-    """Return (virtual address, contents) for each executable section."""
+    """Return (virtual address, contents) for each executable section.
+
+    The address is `sh_addr`, not the file offset: the failures this check
+    reports are read by a human with a disassembler, and an offset into a file
+    is not an address anybody can look up.  (An earlier version returned the
+    file offset, which is the same number only when the first executable
+    section starts at file offset 0 - true for neither of the images this
+    project builds.)
+    """
     data = path.read_bytes()
     out = []
-    for _name, sh_type, sh_flags, sh_off, sh_size in sections(path):
+    for _name, sh_type, sh_flags, sh_addr, sh_off, sh_size in sections(path):
         if sh_type == SHT_NOBITS or not sh_flags & SHF_EXECINSTR or sh_size == 0:
             continue
-        out.append((sh_off, data[sh_off:sh_off + sh_size]))
+        out.append((sh_addr, data[sh_off:sh_off + sh_size]))
     return out
 
 
 def executable_bytes(path: Path) -> bytes:
     """Concatenate the contents of the executable sections."""
-    return b"".join(chunk for _off, chunk in executable_sections(path))
+    return b"".join(chunk for _addr, chunk in executable_sections(path))
 
 
 def attributes_with_readelf(path: Path) -> dict[str, str]:
@@ -203,7 +230,8 @@ def disassemble(code: bytes, base: int = 0) -> list[tuple[int, str]]:
     return instructions
 
 
-def check_instructions(instructions: list[tuple[int, str]]) -> list[str]:
+def check_instructions(instructions: list[tuple[int, str]],
+                       allow_armv7_barriers: bool = False) -> list[str]:
     problems: list[str] = []
     reported: set[str] = set()
 
@@ -211,6 +239,8 @@ def check_instructions(instructions: list[tuple[int, str]]) -> list[str]:
         base = mnemonic.split(".")[0].split()[0]
         # The barrier/hint mnemonics are also in ARMV7_ONLY, but for those the
         # useful message is the ARMv6 CP15 equivalent, so check them first.
+        if base in BARRIER_HINTS and allow_armv7_barriers:
+            continue
         if base in BARRIER_HINTS:
             if base in reported:
                 continue
@@ -240,6 +270,17 @@ def main(argv: list[str]) -> int:
                              "instruction level check (CI always passes this: a "
                              "silently skipped ISA check is a false pass)")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("--allow-armv7-barriers", action="store_true",
+                        help="permit the ARMv7 DMB/DSB/ISB hint encodings.  This "
+                             "is for images built by someone else's toolchain "
+                             "that contain ARMv7 atomics routines and choose "
+                             "between them at run time: musl compiles "
+                             "__a_barrier_v7 and __a_cas_v7 into every ARM build "
+                             "and selects one against AT_PLATFORM, which this "
+                             "kernel reports as a v6 platform, so the ARMv7 path "
+                             "is never reached.  It does not excuse any other "
+                             "ARMv7 instruction - a SDIV, a MOVW or a NEON "
+                             "opcode in the same image is still a failure.")
     args = parser.parse_args(argv)
 
     path = Path(args.elf)
@@ -263,14 +304,18 @@ def main(argv: list[str]) -> int:
 
     instructions: list[tuple[int, str]] = []
     try:
-        instructions = disassemble(code)
+        # Each executable section is disassembled at the address it will be
+        # loaded at, so a reported address is one a reader can look up.
+        for addr, chunk in executable_sections(path):
+            instructions.extend(disassemble(chunk, addr))
     except CapstoneMissing as exc:
         if args.require_capstone:
             failures.append(str(exc))
         else:
             print(f"check_isa: warning: {exc}; "
                   "only the build attributes were verified", file=sys.stderr)
-    failures.extend(check_instructions(instructions))
+    failures.extend(check_instructions(instructions,
+                                       allow_armv7_barriers=args.allow_armv7_barriers))
 
     for failure in failures:
         print(f"check_isa: FAIL: {failure}", file=sys.stderr)

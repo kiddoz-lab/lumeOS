@@ -23,7 +23,9 @@
 #define LUME_SYS_getpid     20
 #define LUME_SYS_brk        45
 #define LUME_SYS_uname     122
+#define LUME_SYS_writev    146
 #define LUME_SYS_exit_group 248
+#define LUME_SYS_set_tid_address 256
 
 #ifndef __ASSEMBLER__
 #ifndef __ASSEMBLY__
@@ -76,6 +78,25 @@ static inline long lume_write(int fd, const void *buf, unsigned long len)
 static inline long lume_getpid(void)
 {
     return lume_syscall0(LUME_SYS_getpid);
+}
+
+/* struct iovec, as the ABI defines it: two 32-bit fields, base then length.
+ * Spelled out rather than pulled from a libc header because this program has no
+ * libc - the point of the header is that the numbers and the layout are the
+ * kernel's, not somebody's idea of them. */
+struct lume_iovec {
+    void *base;
+    unsigned long len;
+};
+
+static inline long lume_writev(int fd, const struct lume_iovec *iov, int count)
+{
+    return lume_syscall3(LUME_SYS_writev, fd, (long)iov, count);
+}
+
+static inline long lume_set_tid_address(long tidptr)
+{
+    return lume_syscall1(LUME_SYS_set_tid_address, tidptr);
 }
 
 static inline void lume_exit(int code)

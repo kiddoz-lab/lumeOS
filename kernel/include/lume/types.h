@@ -24,6 +24,14 @@ typedef __UINTPTR_TYPE__ uintptr_t_lume;
 
 typedef u32 ssize_t_lume;
 
+/* The ABI's struct iovec (writev(2)): two 32-bit fields, base then length, no
+ * padding.  It lives here because it is a wire format shared with userspace,
+ * not an implementation detail of the syscall that reads it. */
+struct lume_iovec {
+    u32 base;
+    u32 len;
+};
+
 #define NULL ((void *)0)
 
 /* Container size helpers. */

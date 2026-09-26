@@ -78,29 +78,6 @@ void kernel_main(u32 fdt_pa, u32 load_addr);
  */
 static struct process *init_proc;
 
-/* A kernel thread that behaves like a shell's parent: it waits for init to
- * exit and reports the status.  Doing it with a real wait4-style wait (rather
- * than polling the process table) means the mechanism a shell will use is the
- * one being exercised. */
-static void init_watchdog(void *arg)
-{
-    struct process *init = (struct process *)arg;
-    struct process *parent = init->parent;
-    u32 status = 0;
-    int pid = proc_wait(parent, (s32)init->pid, 0, &status);
-
-    if (pid < 0) {
-        pr_err("init: wait for pid %u failed (%d)", init->pid, pid);
-        return;
-    }
-    /* Linux wait(2) status encoding: normal exit is (code & 0xFF) << 8. */
-    if ((status & 0x7F) == 0)
-        pr_notice("init: pid %u exited with status %u (exit code %u)",
-                  init->pid, status, (status >> 8) & 0xFF);
-    else
-        pr_notice("init: pid %u was killed by signal %u", init->pid, status & 0x7F);
-}
-
 /*
  * Build the initial user stack: the strings the program can see, then argv,
  * then argc, exactly as the Linux ABI describes process entry
@@ -125,7 +102,8 @@ static void init_watchdog(void *arg)
  *     a program that has already rearranged argv.
  */
 static u32 build_user_stack(struct process *p, struct elf_image *image,
-                            const char **argv, const char **envp)
+                            const char **argv, const char **envp,
+                            const char *label)
 {
     struct user_startup start;
     struct user_stack_info info;
@@ -146,55 +124,87 @@ static u32 build_user_stack(struct process *p, struct elf_image *image,
     if (!user_stack_build_ex(p->as, &start, &info))
         return 0;
 
-    pr_info("init: stack at 0x%08x..0x%08x (%u pages, %u bytes: argc/argv/envp "
-            "+ %u auxv entries)", info.sp, LUME_USER_STACK_TOP, info.pages,
-            info.bytes, info.auxv_entries);
-    pr_info("init: auxv AT_PAGESZ %u, AT_ENTRY 0x%08x, AT_PHDR 0x%08x, "
+    pr_info("%s: stack at 0x%08x..0x%08x (%u pages, %u bytes: argc/argv/envp "
+            "+ %u auxv entries)", label, info.sp, LUME_USER_STACK_TOP,
+            info.pages, info.bytes, info.auxv_entries);
+    pr_info("%s: auxv AT_PAGESZ %u, AT_ENTRY 0x%08x, AT_PHDR 0x%08x, "
             "AT_PHNUM %u, AT_HWCAP 0x%08x, AT_CLKTCK %u",
-            PAGE_SIZE, image->entry, image->phdr, image->phnum,
+            label, PAGE_SIZE, image->entry, image->phdr, image->phnum,
             LUME_HWCAP_ARMv6KZ, LUME_AT_CLKTCK_VALUE);
     return info.sp;
 }
 
-struct process *init_start(struct process *launcher)
+/*
+ * One program the kernel carries and runs from the boot sequence.  `name` is
+ * the prefix on the kernel's log lines and `path` is what the program sees as
+ * argv[0] and AT_EXECFN - they are separate because the first is a log label
+ * and the second is data the program may print or trust.
+ *
+ * The musl entry is the interesting one: nothing in this kernel knows or cares
+ * that a C library wrote that image.  It is loaded by the same elf_load(), from
+ * the same kind of blob, into its own address space, and the only thing that
+ * distinguishes it is that its startup path runs thousands of lines of someone
+ * else's code before it prints anything.
+ */
+struct embedded_program {
+    const char *name;
+    const char *path;
+    const u8 *image;
+    const u32 *size;    /* the generated symbols are variables, not constants */
+    const u32 *entry;
+    const char *sha256;
+};
+
+static const struct embedded_program boot_programs[] = {
+    { "init", LUME_DEFAULT_INIT, lume_init_elf,
+      &lume_init_elf_size, &lume_init_elf_entry, lume_init_elf_sha256 },
+    { "musl", LUME_MUSL_HELLO_PATH, lume_musl_elf,
+      &lume_musl_elf_size, &lume_musl_elf_entry, lume_musl_elf_sha256 },
+};
+
+/** Start one embedded program as a child of `launcher`.  The process and its
+ *  address space are created, the image is loaded by the same elf_load() a
+ *  filesystem-backed exec(2) will use, the initial stack is built, and the
+ *  thread is pointed at the entry point - with interrupts off across the whole
+ *  sequence so it cannot be scheduled before there is anything to run. */
+static struct process *start_embedded_program(struct process *launcher,
+                                              const struct embedded_program *prog)
 {
     struct elf_image image;
     struct process *p;
     u32 sp;
     const char *argv[2];
     const char *envp[1];
+    u32 size = *prog->size;
+    const u8 *blob = prog->image;
     u32 flags;
 
-    pr_notice("init: loading the embedded %u-byte init image (entry 0x%08x, "
-              "sha256 %s)", lume_init_elf_size, lume_init_elf_entry,
-              lume_init_elf_sha256);
+    pr_notice("%s: loading the embedded %u-byte %s image (entry 0x%08x, "
+              "sha256 %s)", prog->name, size, prog->name, *prog->entry,
+              prog->sha256);
 
-    /* The process and its thread are created first (a process owns its address
-     * space) and the entry point is fixed up once the image has been parsed;
-     * interrupts stay off across the whole sequence so the new thread cannot
-     * be scheduled before there is anything to run. */
     flags = arm_irq_save();
-    p = proc_create("init", 0, 0, 0, launcher);
+    p = proc_create(prog->name, 0, 0, 0, launcher);
     if (!p) {
         arm_irq_restore(flags);
-        pr_err("init: cannot create the init process");
+        pr_err("%s: cannot create the process", prog->name);
         return NULL;
     }
 
-    if (elf_load(p->as, lume_init_elf, lume_init_elf_size, &image) < 0) {
-        pr_err("init: the embedded image did not load");
+    if (elf_load(p->as, blob, size, &image) < 0) {
+        pr_err("%s: the embedded image did not load", prog->name);
         proc_discard(p, launcher);
         arm_irq_restore(flags);
         return NULL;
     }
     proc_set_brk_base(p, image.image_end);
 
-    argv[0] = LUME_DEFAULT_INIT;
+    argv[0] = prog->path;
     argv[1] = NULL;
     envp[0] = NULL;
-    sp = build_user_stack(p, &image, argv, envp);
+    sp = build_user_stack(p, &image, argv, envp, prog->name);
     if (!sp) {
-        pr_err("init: cannot build the initial stack");
+        pr_err("%s: cannot build the initial stack", prog->name);
         proc_discard(p, launcher);
         arm_irq_restore(flags);
         return NULL;
@@ -208,9 +218,74 @@ struct process *init_start(struct process *launcher)
     arch_thread_set_user_entry(p->thread, image.entry, sp, 0);
     arm_irq_restore(flags);
 
-    pr_notice("init: entering user mode at 0x%08x on stack 0x%08x",
-              image.entry, sp);
+    pr_notice("%s: entering user mode at 0x%08x on stack 0x%08x",
+              prog->name, image.entry, sp);
     return p;
+}
+
+struct process *init_start(struct process *launcher)
+{
+    return start_embedded_program(launcher, &boot_programs[0]);
+}
+
+/* Reap one process and report what it did, in the encoding wait(2) uses
+ * (a normal exit is (code & 0xFF) << 8). */
+static void reap_and_report(struct process *p, const char *label, u32 *status_out)
+{
+    struct process *parent = p->parent;
+    u32 status = 0;
+    int pid = proc_wait(parent, (s32)p->pid, 0, &status);
+
+    if (status_out)
+        *status_out = status;
+    if (pid < 0) {
+        pr_err("%s: wait for pid %u failed (%d)", label, p->pid, pid);
+        return;
+    }
+    if ((status & 0x7F) == 0)
+        pr_notice("%s: pid %u exited with status %u (exit code %u)",
+                  label, p->pid, status, (status >> 8) & 0xFF);
+    else
+        pr_notice("%s: pid %u was killed by signal %u", label, p->pid,
+                  status & 0x7F);
+}
+
+/*
+ * The boot sequence: the kernel's programs, in order.
+ *
+ * init runs first and checks the entry interface from the program's side.  The
+ * musl hello world runs second and answers a different question - can a real C
+ * library start here - which nothing in this kernel can answer about itself,
+ * because the answer is a property of the *combination* of the stack, the
+ * auxiliary vector, the program headers and the syscalls one libc's startup
+ * happens to use.
+ *
+ * Its exit status is reported either way, and the QEMU test requires the
+ * markers for both programs, so a change that stops a C library from starting
+ * fails the build instead of producing a kernel that boots to a shell and
+ * cannot run anything.
+ *
+ * This is what a real init will replace: a program that starts other programs
+ * from a filesystem instead of the kernel starting them from .rodata.
+ */
+static void boot_watchdog(void *arg)
+{
+    struct process *init = (struct process *)arg;
+    struct process *parent = init->parent;
+    struct process *next;
+    u32 status = 0;
+
+    reap_and_report(init, boot_programs[0].name, &status);
+    if ((status & 0x7F) != 0)
+        return;   /* init did not exit normally; the QEMU gate says so */
+
+    next = start_embedded_program(parent, &boot_programs[1]);
+    if (!next) {
+        pr_err("%s: the second program could not be started",
+               boot_programs[1].name);
+        return;
+    }
+    reap_and_report(next, boot_programs[1].name, NULL);
 }
 
 static u32 kernel_image_end_pa;
@@ -303,7 +378,7 @@ void kernel_main(u32 fdt_pa, u32 load_addr)
      * userspace shell (docs/roadmap.md tracks the difference). */
     init_proc = init_start(proc_current());
     if (init_proc) {
-        if (!thread_create("init-watchdog", init_watchdog, init_proc)) {
+        if (!thread_create("boot-watchdog", boot_watchdog, init_proc)) {
             pr_warn("main: cannot start the init watchdog; the exit status of "
                     "pid %u will not be reported", init_proc->pid);
         }

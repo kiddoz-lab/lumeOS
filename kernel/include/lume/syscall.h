@@ -39,8 +39,10 @@
 #define LUME_NR_dup          41
 #define LUME_NR_uname       122
 #define LUME_NR_wait4       114
+#define LUME_NR_writev      146
 #define LUME_NR_mmap2       192
 #define LUME_NR_exit_group  248
+#define LUME_NR_set_tid_address 256
 #define LUME_NR_set_tls     0x0f0005  /* __ARM_NR_set_tls */
 
 /* The kernel calls this from do_syscall() with the trap frame the exception

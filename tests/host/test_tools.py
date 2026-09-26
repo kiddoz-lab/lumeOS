@@ -207,10 +207,33 @@ class CheckIsaTests(unittest.TestCase):
                 problems = check_isa.check_instructions([(0x0, mnemonic)])
                 self.assertTrue(problems, f"{mnemonic} must be rejected")
 
+    def test_armv6k_exclusives_are_allowed(self):
+        # The ARM1176JZF-S is ARMv6Z (ARMv6K with Security Extensions), which
+        # introduced the byte, halfword and doubleword exclusive accesses.  An
+        # earlier version of the forbidden list rejected them, which rejected
+        # correct code - musl's startup is full of LDREXB/STREXB on this CPU.
+        self.assertFalse(set(check_isa.ARMV6K_EXCLUSIVES) & check_isa.ARMV7_ONLY)
+        for mnemonic in check_isa.ARMV6K_EXCLUSIVES:
+            with self.subTest(mnemonic=mnemonic):
+                self.assertEqual(
+                    check_isa.check_instructions([(0x0, mnemonic)]), [])
+
     def test_barrier_hint_is_reported(self):
         problems = check_isa.check_instructions([(0x0, "dmb")])
         self.assertEqual(len(problems), 1)
         self.assertIn("ARMv7 hint", problems[0])
+
+    def test_barriers_can_be_excused_one_mnemonic_class_at_a_time(self):
+        # --allow-armv7-barriers exists for a foreign image whose ARMv7 atomics
+        # routines are never selected at run time (musl selects them against
+        # AT_PLATFORM).  It must not excuse anything else.
+        excused = check_isa.check_instructions([(0x0, "dmb"), (0x4, "dsb")],
+                                               allow_armv7_barriers=True)
+        self.assertEqual(excused, [])
+        still_rejected = check_isa.check_instructions(
+            [(0x0, "dmb"), (0x4, "movw"), (0x8, "vadd.f32")],
+            allow_armv7_barriers=True)
+        self.assertEqual(len(still_rejected), 2)
 
 
 class Elf2BinTests(unittest.TestCase):

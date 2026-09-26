@@ -271,6 +271,54 @@ int main(int argc, char **argv)
         puts_fd(1, "init: auxv verified\n");
     }
 
+    /*
+     * writev(2).  This is the syscall a C library's stdio writes *through*:
+     * musl's __stdio_write calls writev and nothing else, so a kernel without
+     * it produces a program that runs, buffers its output, calls flush, and
+     * exits 0 having printed nothing.  Three iovecs here, so the vector is
+     * genuinely a vector, and the return value has to be the sum of their
+     * lengths.
+     */
+    {
+        static const char a[] = "init: writev ";
+        static const char b[] = "wrote three iovecs";
+        static const char c[] = " in one call\n";
+        struct lume_iovec v[3];
+        long n;
+
+        v[0].base = (void *)a;
+        v[0].len = len_of(a);
+        v[1].base = (void *)b;
+        v[1].len = len_of(b);
+        v[2].base = (void *)c;
+        v[2].len = len_of(c);
+
+        n = lume_writev(1, v, 3);
+        if (n != (long)(v[0].len + v[1].len + v[2].len)) {
+            puts_fd(2, "init: writev check FAILED\n");
+            lume_exit(1);
+        }
+    }
+
+    /*
+     * set_tid_address(2): the kernel picks the pid and returns it; a libc uses
+     * that as the thread's identity before it has any other way to ask.  The
+     * pointer is the address a thread's exit should clear - it belongs to
+     * futexes, which do not exist yet - so what is checked here is the part
+     * that is implemented: the return value.
+     */
+    {
+        long tid = lume_set_tid_address((long)&pid);
+
+        if (tid != pid) {
+            puts_fd(2, "init: set_tid_address returned the wrong pid\n");
+            lume_exit(1);
+        }
+        puts_fd(1, "init: set_tid_address echoes pid ");
+        put_dec(1, (u32)tid);
+        puts_fd(1, ", writev wrote 3 iovecs\n");
+    }
+
     puts_fd(1, "init: exiting with status 0\n");
     lume_exit(0);
     return 0;   /* not reached */

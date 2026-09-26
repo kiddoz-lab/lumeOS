@@ -16,6 +16,11 @@
 #endif
 #define LUME_MACHINE  "Raspberry Pi Zero W (BCM2835)"
 
+/* Where the second embedded program says it lives.  There is no filesystem
+ * yet, so this is a name the program is told, not a path anything resolves -
+ * the same fiction LUME_DEFAULT_INIT tells. */
+#define LUME_MUSL_HELLO_PATH "/bin/musl-hello"
+
 /* Strings reported through the Linux-compatible uname(2) syscall.  LumeOS is
  * not Linux, and nothing here pretends it is: the sysname is LumeOS.  The
  * kernel release is kept in the numeric form tools expect from uname. */
@@ -27,6 +32,11 @@
 /* Scheduler tick.  100 Hz is a compromise that keeps idle power reasonable
  * on a 1 GHz ARM1176 while giving interactive shell latency below 20 ms. */
 #define LUME_HZ 100
+
+/* The most iovecs one writev(2) may name.  Linux's IOV_MAX is 1024; a libc's
+ * stdio uses two or three, and a small cap keeps a single syscall from holding
+ * the CPU for an unbounded time on a machine with one core. */
+#define LUME_IOV_MAX 16
 
 /* Kernel heap initial size (bytes) grown on demand from the page allocator. */
 #define LUME_KERNEL_HEAP_INITIAL (256 * 1024)

@@ -75,6 +75,16 @@ USER_MARKERS = [
     "init: auxv verified",
     "init: exiting with status 0",
     "init: pid 1 exited with status 0",
+    # The second program is built against musl - a real C library - by a
+    # different toolchain, and its first line only appears if that library's
+    # startup ran: the auxiliary vector, the program headers it was told about,
+    # the thread pointer, malloc through brk and stdio through writev.  The
+    # kernel's own lines about it are markers too, because "the program printed
+    # something and then hung" and "the program exited 0" are different
+    # outcomes and the emulator should say which one happened.
+    "musl: entering user mode at",
+    "musl: hello from a real C library",
+    "musl: pid 2 exited with status 0",
 ]
 
 # "selftest: 24/24 checks passed"
@@ -83,7 +93,9 @@ SELFTEST_RE = re.compile(r"selftest: (\d+)/(\d+) checks passed")
 # reports fewer checks than this has lost most of its self tests (a build
 # problem, a truncated boot), and the count is asserted so that the summary
 # cannot quietly become vacuous.  The kernel currently runs 91 checks: 26 of
-# which are the initial-stack/auxv tests.
+# which are the initial-stack/auxv tests.  (The musl program's run adds no
+# in-kernel checks - it is not the kernel's code - so this floor does not move
+# with it.)
 MIN_SELFTEST_CHECKS = 80
 
 FAILURE_PATTERNS = [

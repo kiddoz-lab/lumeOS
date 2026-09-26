@@ -33,7 +33,7 @@ MAP           := $(BUILD)/lumeos.map
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILDFLAGS := -DLUME_BUILD_COMMIT='"$(GIT_COMMIT)"'
 
-ARCHFLAGS := -march=armv6kz -mcpu=arm1176jzf-s -marm -mlittle-endian \
+ARCHFLAGS := -march=armv6kz -mcpu=arm1176jzf_s -marm -mlittle-endian \
              -mfloat-abi=soft -mno-unaligned-access
 
 COMMONFLAGS := $(ARCHFLAGS) $(BUILDFLAGS) -ffreestanding -fno-builtin -fno-common \
@@ -109,7 +109,8 @@ KERNEL_S := \
 # become $(BUILD)/foo.o and be linked twice - keep the stems distinct.
 KERNEL_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(KERNEL_C)) \
                $(patsubst %.S,$(BUILD)/%.o,$(KERNEL_S)) \
-               $(BUILD)/init_blob.o
+               $(BUILD)/init_blob.o \
+               $(BUILD)/musl_blob.o
 
 # ---------------------------------------------------------------------------
 # Userspace
@@ -126,12 +127,54 @@ USERSPACE_S   := userspace/lib/crt0.S
 USERSPACE_LD  := userspace/init/linker.ld
 USER_ELF      := $(BUILD)/userspace/init.elf
 
+# The second user program is linked against a real C library (musl), and that
+# is the point of it: it is what proves a libc can start, which a hand-written
+# program cannot.  It needs a compiler that can target Linux rather than bare
+# metal, and the vendored one in the development environment is zig
+# (`zig cc -target arm-linux-musleabi`), which ships musl's source and builds
+# the libc as part of the link - so nothing has to be installed for it beyond
+# zig itself, and nothing is fetched at build time.
+#
+# The target is the same core and the same ABI as the kernel: ARM1176JZF-S,
+# soft float.  A generic-ARM build would also run (ARMv4 instructions are legal
+# on an ARMv6 core) but musl would compile its atomics for a CPU without
+# ldrex/strex, and the whole exercise is to run the code an ARMv6 build
+# produces.
+# Where zig comes from, in order: an explicit LUME_ZIG, a `zig` on PATH, or the
+# binary bundled with the ziglang Python package (`pip install ziglang`).  The
+# last is what CI and the development environment use, and looking it up through
+# $(PYTHON) keeps the two agreeing on which environment is in play - which is
+# also why the pip package is the documented way to get it.
+LUME_ZIG      ?= $(shell command -v zig 2>/dev/null || \
+                   $(PYTHON) -c 'import os,ziglang;print(os.path.join(os.path.dirname(ziglang.__file__),"zig"))' 2>/dev/null)
+# The ISA gate runs on this image too, with one excuse spelled out on the
+# command line: musl compiles its ARMv7 atomics (__a_cas_v7, __a_barrier_v7 -
+# the ones with DMB) into *every* ARM build and picks between the v6 and the v7
+# version at run time, from AT_PLATFORM and AT_HWCAP.  This kernel reports
+# AT_PLATFORM "v6l" and HWCAP_TLS, so musl selects the v6 routines and never
+# reaches the v7 ones - but the instructions are in the image, and a gate that
+# insisted "no ARMv7 instruction anywhere in this file" would have to reject
+# every binary a real toolchain produces.  Everything else in the image is
+# checked strictly, and nothing is excused in the images this repository
+# compiles itself.
+MUSL_CC       := $(LUME_ZIG) cc -target arm-linux-musleabi -mcpu=arm1176jzf_s \
+                 -mfloat-abi=soft
+MUSL_CFLAGS   := -Os -Wall -Wextra
+MUSL_LDFLAGS  := -static -s -Wl,--build-id=none -Wl,--gc-sections
+MUSL_C        := userspace/musl-hello/main.c
+MUSL_ELF      := $(BUILD)/userspace/musl-hello.elf
+
 USER_CFLAGS   := $(ARCHFLAGS) -ffreestanding -fno-builtin -fno-common \
                  -fno-stack-protector -fno-omit-frame-pointer -fno-pic -fno-pie \
                  -Wall -Wextra -std=gnu11 -O2 -g3 \
                  -I userspace/lib -nostdinc
 USER_LDFLAGS  := -nostdlib -nostartfiles -static -Wl,--build-id=none \
                  -Wl,-z,max-page-size=4096 -Wl,--no-warn-rwx-segments
+
+# tools/zig-cc.sh reads this from the environment (a make variable is not
+# exported on its own), so `make CC=tools/zig-cc.sh kernel` finds the same zig
+# the musl build uses without the caller having to export anything.
+export LUME_ZIG
 
 # ---------------------------------------------------------------------------
 # Rules
@@ -156,7 +199,19 @@ $(KERNEL): $(KERNEL_OBJS) $(LDSCRIPT)
 	$(PYTHON) tools/check_isa.py $(CHECK_ISA_FLAGS) $@
 	$(PYTHON) tools/check_abi.py $(CHECK_ABI_FLAGS) $@
 
-userspace: $(USER_ELF)
+userspace: $(USER_ELF) $(MUSL_ELF)
+
+$(MUSL_ELF): $(MUSL_C)
+	@mkdir -p $(dir $@)
+	@if [ -z "$(LUME_ZIG)" ]; then \
+	    echo "userspace: zig is required to build $(MUSL_C)"; \
+	    echo "userspace:   install ziglang (pip install ziglang) or set LUME_ZIG=/path/to/zig"; \
+	    exit 1; \
+	fi
+	$(MUSL_CC) $(MUSL_CFLAGS) $(MUSL_LDFLAGS) $< -o $@
+	$(PYTHON) tools/check_isa.py $(CHECK_ISA_FLAGS) --allow-armv7-barriers $@
+	$(PYTHON) tools/check_abi.py $(CHECK_ABI_FLAGS) --allow-none $@
+	@echo "userspace: $@ built from $(MUSL_C) against musl (zig cc)" 
 
 $(USER_ELF): $(USERSPACE_C) $(USERSPACE_S) $(USERSPACE_LD)
 	@mkdir -p $(dir $@)
@@ -166,12 +221,20 @@ $(USER_ELF): $(USERSPACE_C) $(USERSPACE_S) $(USERSPACE_LD)
 	$(PYTHON) tools/check_abi.py $(CHECK_ABI_FLAGS) --allow-none $@
 	@echo "userspace: $@ built from $(USERSPACE_C)"
 
-# The blob is a build product; the kernel links it like any other object.
+# The blobs are build products; the kernel links them like any other object.
 $(BUILD)/init_blob.c: $(USER_ELF) tools/embed_user.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) tools/embed_user.py $(USER_ELF) --symbol lume_init_elf --output $@
 
+$(BUILD)/musl_blob.c: $(MUSL_ELF) tools/embed_user.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) tools/embed_user.py $(MUSL_ELF) --symbol lume_musl_elf --output $@
+
 $(BUILD)/init_blob.o: $(BUILD)/init_blob.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/musl_blob.o: $(BUILD)/musl_blob.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 

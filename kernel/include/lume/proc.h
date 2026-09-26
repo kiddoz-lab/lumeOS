@@ -45,6 +45,11 @@ struct process {
     char cwd[LUME_PATH_MAX];
 
     u32 tls;              /* TPIDRURO value for this process */
+    u32 clear_child_tid;  /* set_tid_address(2): cleared and futex-woken on exit
+                           * once threads and futexes exist; today it is stored
+                           * so the call has the effect a caller can observe -
+                           * the pid it returns - and nothing is promised that
+                           * the kernel does not do */
     int exit_code;        /* low 8 bits: WEXITSTATUS */
     int killed_by_signal;
     u32 uid, gid, euid, egid;
