@@ -209,8 +209,16 @@ jobs:
             # separately keeps them out of the way of the tail above when it is
             # something else that broke.
             python3 tools/ci_annotate.py qemu-test.log \
-                --title "userspace hand-off" --grep "init:|syscall:|elf:" \
+                --title "userspace hand-off" --grep "init:|musl:|syscall:|elf:" \
                 --max-chars 3000
+            # A fault in user mode prints a full frame dump (pc, fault address,
+            # every register).  It is the first thing anyone needs when a
+            # program dies, and it is easy to miss in a serial log, so publish
+            # those lines on their own.
+            python3 tools/ci_annotate.py qemu-test.log \
+                --title "user-mode fault" \
+                --grep "exception:|abort at pc=|fault address|^.*  r[0-9]+=|user fault in pid" \
+                --max-chars 3000 || true
             exit 1
           fi
           # Record the result of a passing boot too: "the emulator booted the
