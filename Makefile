@@ -33,7 +33,12 @@ MAP           := $(BUILD)/lumeos.map
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILDFLAGS := -DLUME_BUILD_COMMIT='"$(GIT_COMMIT)"'
 
-ARCHFLAGS := -march=armv6kz -mcpu=arm1176jzf_s -marm -mlittle-endian \
+# GNU spells the core with a hyphen and zig with an underscore; the musl rule
+# below carries zig's spelling, and this line is the one the ARM toolchain and
+# tools/zig-cc.sh both parse.  (Renaming this one broke CI in exactly one way:
+# arm-none-eabi-gcc does not know arm1176jzf_s, and zig does not know
+# arm1176jzf-s.)
+ARCHFLAGS := -march=armv6kz -mcpu=arm1176jzf-s -marm -mlittle-endian \
              -mfloat-abi=soft -mno-unaligned-access
 
 COMMONFLAGS := $(ARCHFLAGS) $(BUILDFLAGS) -ffreestanding -fno-builtin -fno-common \
