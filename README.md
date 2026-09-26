@@ -39,8 +39,9 @@ exists and is checked to the extent an emulator and a host machine allow.
 | Kernel shell | 🟡 prompt appears under QEMU; no command has been typed into it yet |
 | Framebuffer / input / storage / networking | **not implemented** |
 | ELF loader (static ARM `ET_EXEC`) | ✅ loads, maps and enters a program; refuses PIE and foreign architectures by name |
-| Userspace: syscalls, processes, consoles | 🟡 a static ARM ELF runs in user mode, makes syscalls (`write`/`read`/`brk`/`uname`/`wait4`/…) and exits with a status the kernel reaps; **unverified on hardware** |
+| Userspace: syscalls, processes, consoles | 🟡 a static ARM ELF runs in user mode, makes syscalls (`write`/`read`/`brk`/`uname`/`wait4`/…), is given `argv`/`envp`/`auxv` in the Linux layout and exits with a status the kernel reaps; **unverified on hardware** |
 | VFS, filesystems, signals, pipes, `fork`, `futex`, `mmap` | **not implemented** (they return `-ENOSYS` and are logged once each) |
+| A real C library (`glibc`/`musl`) | **does not start yet**: `auxv` is in place, but a libc wants `mmap2`, `mprotect`, `clock_gettime` and signals, and no filesystem exists to load it from |
 
 The distinction matters and is maintained everywhere in this repository:
 *done* means it builds and is covered by a test that actually ran, *unverified*

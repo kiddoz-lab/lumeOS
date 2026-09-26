@@ -11,6 +11,7 @@
  * checks (booting, userspace syscalls) live in tests/qemu and tests/host.
  */
 #include <lume/asm.h>
+#include <lume/auxv.h>
 #include <lume/config.h>
 #include <lume/elf.h>
 #include <lume/init.h>
@@ -18,12 +19,14 @@
 #include <lume/mem.h>
 #include <lume/proc.h>
 #include <lume/pte.h>
+#include <lume/random.h>
 #include <lume/sched.h>
 #include <lume/string.h>
 #include <lume/time.h>
 #include <lume/trapframe.h>
 #include <lume/traptest.h>
 #include <lume/types.h>
+#include <lume/ustack.h>
 
 static int tests_run;
 static int tests_failed;
@@ -313,6 +316,176 @@ static void test_elf(void)
     }
 }
 
+
+/*
+ * The initial user stack: the ABI contract the first program is handed.
+ *
+ * init checks the stack it is actually running on.  This checks the builder, in
+ * the kernel, with inputs init does not have (two arguments, a non-empty
+ * environment) and with the assertions a program cannot make about itself: that
+ * the NULL terminators are there, that the auxiliary vector ends in AT_NULL,
+ * that the 16 random bytes in user memory are the ones the generator produced,
+ * and that everything the pointers name is readable in the target address space.
+ *
+ * The vector is walked one pair at a time rather than read as a block on
+ * purpose: a bounded read of a region whose size depends on the layout would be
+ * a read past the end of the stack, which is the kind of test that fails for
+ * its own reasons.
+ */
+static void test_ustack(void)
+{
+    const char *argv[] = { "/bin/init", "--selftest", NULL };
+    const char *envp[] = { "LUME=1", NULL };
+    struct user_startup start;
+    struct user_stack_info info;
+    struct vm_space *as = vmm_space_create();
+    u32 tables[8];
+    u32 expect[4];
+    u32 sp, auxv_sp;
+    u8 expect_bytes[16];
+
+    check("ustack space create", as != NULL);
+    if (!as)
+        return;
+
+    memset(&start, 0, sizeof(start));
+    start.path = "/bin/init";
+    start.argv = argv;
+    start.envp = envp;
+    start.entry = 0x00010000;
+    start.phdr = 0x00010034;
+    start.phnum = 3;
+    start.phent = 32;
+    start.uid = start.euid = 0;
+    start.gid = start.egid = 0;
+
+    /* Seed the generator twice with the same value and record what the stream
+     * produces: the build consumes exactly four words of it (16 bytes), so the
+     * bytes that reach user memory are known in advance and can be compared. */
+    lume_random_seed(0x12345678u);
+    for (u32 i = 0; i < 4; i++)
+        expect[i] = lume_random_u32();
+    memcpy(expect_bytes, expect, sizeof(expect_bytes));
+    lume_random_seed(0x12345678u);
+
+    sp = user_stack_build_ex(as, &start, &info);
+    check("ustack builds", sp != 0);
+    if (!sp) {
+        vmm_space_destroy(as);
+        return;
+    }
+
+    check("ustack sp is 16-byte aligned", IS_ALIGNED(sp, 16));
+    check("ustack maps at least the minimum",
+          info.pages >= LUME_USER_STACK_MIN_PAGES);
+    check("ustack sp lies inside its own pages",
+          sp >= LUME_USER_STACK_TOP - info.pages * PAGE_SIZE);
+    check("ustack bytes used", info.bytes > 0 &&
+          info.bytes <= info.pages * PAGE_SIZE);
+    check("ustack reports one auxv entry per pair", info.auxv_entries ==
+          user_auxv_count());
+
+    /* The tables, read exactly the way a program walks them. */
+    if (copy_from_user_as(as, tables, (void *)sp, sizeof(tables)) != 0) {
+        check("ustack tables readable", 0);
+        vmm_space_destroy(as);
+        return;
+    }
+    check("ustack tables readable", 1);
+    check("ustack argc", tables[0] == 2);
+    check("ustack argv pointers", tables[1] != 0 && tables[2] != 0);
+    check("ustack argv NULL terminator", tables[3] == 0);
+    check("ustack envp pointer", tables[4] != 0);
+    check("ustack envp NULL terminator", tables[5] == 0);
+
+    /* The strings those pointers name must be readable and correct. */
+    {
+        char buf[16];
+
+        if (copy_from_user_as(as, buf, (void *)tables[1], 11) == 0 &&
+            strcmp(buf, "/bin/init") == 0)
+            check("ustack argv[0] string", 1);
+        else
+            check("ustack argv[0] string", 0);
+        if (copy_from_user_as(as, buf, (void *)tables[4], 8) == 0 &&
+            strcmp(buf, "LUME=1") == 0)
+            check("ustack envp[0] string", 1);
+        else
+            check("ustack envp[0] string", 0);
+    }
+
+    /* The auxiliary vector: pair by pair, until AT_NULL. */
+    auxv_sp = sp + 4 * (1 + 3 + 2);      /* argc + argv + NULL + envp + NULL */
+    {
+        u32 entries = 0, pagesz = 0, entry = 0, phdr = 0, phnum = 0, hwcap = 0;
+        u32 clktck = 0, random_va = 0, execfn_va = 0, terminated = 0;
+        u32 pair[2];
+        u32 i;
+
+        for (i = 0; i <= user_auxv_count(); i++) {
+            if (copy_from_user_as(as, pair, (void *)(auxv_sp + 8 * i), 8) < 0)
+                break;
+            if (pair[0] == LUME_AT_NULL) {
+                terminated = 1;
+                break;
+            }
+            entries++;
+            switch (pair[0]) {
+            case LUME_AT_PAGESZ: pagesz = pair[1]; break;
+            case LUME_AT_ENTRY:  entry = pair[1]; break;
+            case LUME_AT_PHDR:   phdr = pair[1]; break;
+            case LUME_AT_PHNUM:  phnum = pair[1]; break;
+            case LUME_AT_HWCAP:  hwcap = pair[1]; break;
+            case LUME_AT_CLKTCK: clktck = pair[1]; break;
+            case LUME_AT_RANDOM: random_va = pair[1]; break;
+            case LUME_AT_EXECFN: execfn_va = pair[1]; break;
+            default: break;
+            }
+        }
+
+        check("ustack auxv readable and terminated", terminated == 1);
+        check("ustack auxv pair count matches the emitter", entries == user_auxv_count());
+        check("ustack AT_PAGESZ", pagesz == PAGE_SIZE);
+        check("ustack AT_ENTRY", entry == start.entry);
+        check("ustack AT_PHDR", phdr == start.phdr);
+        check("ustack AT_PHNUM", phnum == start.phnum);
+        check("ustack AT_CLKTCK", clktck == LUME_AT_CLKTCK_VALUE);
+        check("ustack AT_HWCAP advertises no floating point",
+              (hwcap & LUME_HWCAP_FP_MASK) == 0);
+        check("ustack AT_HWCAP advertises the ARMv6 core",
+              (hwcap & LUME_HWCAP_ARMv6KZ) == LUME_HWCAP_ARMv6KZ);
+
+        /* AT_RANDOM: the bytes must be exactly the generator's output, which
+         * proves they were written and that the pointer addresses them - an
+         * all-zero stack would fail this, and so would a truncated one. */
+        if (random_va) {
+            u8 got[16];
+
+            if (copy_from_user_as(as, got, (void *)random_va, 16) == 0 &&
+                memcmp(got, expect_bytes, 16) == 0)
+                check("ustack AT_RANDOM is the generator's 16 bytes", 1);
+            else
+                check("ustack AT_RANDOM is the generator's 16 bytes", 0);
+        } else {
+            check("ustack AT_RANDOM is the generator's 16 bytes", 0);
+        }
+
+        if (execfn_va) {
+            char buf[16];
+
+            if (copy_from_user_as(as, buf, (void *)execfn_va, 11) == 0 &&
+                strcmp(buf, "/bin/init") == 0)
+                check("ustack AT_EXECFN string", 1);
+            else
+                check("ustack AT_EXECFN string", 0);
+        } else {
+            check("ustack AT_EXECFN string", 0);
+        }
+    }
+
+    vmm_space_destroy(as);
+}
+
 void selftest_run(void)
 {
     tests_run = 0;
@@ -329,6 +502,7 @@ void selftest_run(void)
     test_proc();
     test_trapframe();
     test_elf();
+    test_ustack();
 
     if (tests_failed == 0)
         pr_notice("selftest: %d/%d checks passed", tests_run - tests_failed, tests_run);

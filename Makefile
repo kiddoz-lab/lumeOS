@@ -79,6 +79,8 @@ KERNEL_C := \
     kernel/kernel/selftest.c \
     kernel/kernel/kshell.c \
     kernel/kernel/elf.c \
+    kernel/kernel/ustack.c \
+    kernel/kernel/random.c \
     kernel/kernel/syscall.c \
     kernel/mm/pmm.c \
     kernel/mm/kmalloc.c \

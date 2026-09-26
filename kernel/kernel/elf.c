@@ -250,6 +250,24 @@ int elf_load(struct vm_space *as, const u8 *image, u32 size,
     out->image_end = image_end;
     out->segments = segments;
     out->pages = pages;
+
+    /* AT_PHDR: the program headers at the address the program will see them.
+     *
+     * For an image moved by `delta` from the address its own headers claim,
+     * every virtual address in the file is `delta` higher than the file says.
+     * `delta` is derived here from the one address that survives the load - the
+     * entry point the caller is about to jump to - rather than assumed to be
+     * zero, so a future relocation-capable loader does not have to find this
+     * line to stay correct.  For everything this loader accepts today (a
+     * non-PIE image loaded at its link address) delta is 0 and AT_PHDR is the
+     * file offset. */
+    {
+        u32 delta = out->entry - ehdr->e_entry;
+
+        out->phdr = delta + ehdr->e_phoff;
+    }
+    out->phnum = ehdr->e_phnum;
+    out->phent = ehdr->e_phentsize;
     return 0;
 
 fail:

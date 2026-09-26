@@ -20,9 +20,9 @@ extern const u32 lume_init_elf_size;
 extern const u32 lume_init_elf_entry;
 extern const char lume_init_elf_sha256[];
 
-/* Where the user stack is mapped from: the top of the stack region, one page
- * down per page needed. */
-#define LUME_INIT_STACK_PAGES 2
+/* The stack init runs on is built by kernel/kernel/ustack.c from the bounds in
+ * config.h (LUME_USER_STACK_TOP / _MIN_PAGES / _MAX); nothing about it is
+ * specific to init, because exec(2) will build one the same way. */
 
 /** Load and start init.  Returns the process, or NULL if it could not be
  *  started (the caller then decides what to do instead). */

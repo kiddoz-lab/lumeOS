@@ -109,12 +109,12 @@ enters user mode, dispatches syscalls and reaps the process.
 | Item | State |
 | --- | --- |
 | ELF32 `EM_ARM` `ET_EXEC` loader | ✅ maps `PT_LOAD` segments with their real permissions, zeroes `bss`, handles pages shared by two segments, cleans/invalidates caches; 7 self tests |
-| Initial stack (`argc`/`argv`/`envp`) | ✅ built through the *new* address space (see `copy_to_user_as`); no `auxv` yet |
+| Initial stack (`argc`/`argv`/`envp`) | ✅ built through the *new* address space (see `copy_to_user_as`), `sp` 16-byte aligned, strings above the tables; 26 self tests, and a host test (`tests/host/test_ustack_layout.py`) that runs the layout arithmetic without an emulator |
 | Syscall entry and dispatch | ✅ `svc #0`, `r7`, `r0-r5`, Linux error convention, `-ENOSYS` + one log line per unimplemented number |
 | `write`, `read`, `exit`, `exit_group`, `getpid`, `getuid`/`euid`, `getgid`/`egid`, `brk`, `uname`, `wait4`, `set_tls` | ✅ |
 | A program that runs and prints through `write(2)` | ✅ `userspace/init`, built by `make userspace`, embedded by `tools/embed_user.py`, asserted marker by marker in QEMU |
 | Process reaping and thread-slot reuse | ✅ a kernel watchdog waits with `wait4` semantics and reports the status |
-| `auxv` (with honest `AT_HWCAP`) | ⛔ next, and the prerequisite for any glibc/musl binary |
+| `auxv` (with honest `AT_HWCAP`) | ✅ 17 pairs + `AT_NULL`, `AT_HWCAP` = `0x00008097` with no FP bit (the static assert in `auxv.h` and the check in the program both say so); `AT_RANDOM` is documented as *not* cryptographic until the BCM2835 RNG is driven |
 | `mmap2`, `mprotect`, `munmap` | ⛔ |
 | Filesystem + `openat`/`stat64`/`getdents64` | ⛔ the VFS is interfaces only; this is what turns the embedded blob into `/bin/init` on a card |
 | Signals, `clone`, `futex`, pipes, `clock_gettime` | ⛔ |
@@ -231,12 +231,13 @@ Three rules, enforced by convention and by CI:
 
 In the order the next commits should happen:
 
-1. **`auxv`, then a real libc.** The next thing that moves the compatibility goal
-   is the auxiliary vector on the initial stack - `AT_PAGESZ`, `AT_ENTRY`,
-   `AT_PHDR`, `AT_RANDOM` and an honest `AT_HWCAP` (ARMv6KZ: no VFP, no NEON, no
-   Thumb-2) - plus `mmap2`, `mprotect`, `munmap` and `clock_gettime`. That is
-   what a static musl `hello world` needs before anything else on this list can
-   be tested against a real binary instead of against our own program.
+1. **A static musl binary, then what it asks for.** The auxiliary vector is in
+   place (`docs/userspace.md` lists the pairs), so the next step is to build a
+   static `hello world` with a real C library, run it, and implement what it
+   turns out to need. The expected list is `mmap2`, `mprotect`, `munmap`,
+   `clock_gettime` and `rt_sigaction`; the honest way to order them is the log
+   line the kernel already prints for each unimplemented number. Its startup
+   will also exercise the initial stack in a way our own program cannot.
 2. **A filesystem, so the next program is not embedded in the kernel.** A
    read-only FAT16 reader on the SD card plus path lookup in the VFS is the
    smallest thing that turns `init` from a blob in `.rodata` into `/bin/init`,

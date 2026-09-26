@@ -44,6 +44,11 @@
 #define LUME_USER_MMAP_BASE  0x40000000u  /* mmap grows upwards from here */
 #define LUME_USER_STACK_TOP  0xBE000000u  /* initial stack top, 8-byte aligned */
 #define LUME_USER_STACK_MAX  (8u * 1024u * 1024u)
+/* Pages mapped for a fresh program even when argv/envp/auxv need less.  A
+ * program that starts with a few hundred bytes of stack and immediately calls a
+ * function expects the stack to grow downwards without a syscall, so the
+ * initial mapping is deliberately larger than the layout. */
+#define LUME_USER_STACK_MIN_PAGES 2
 
 /* Command line passed by the Raspberry Pi firmware through cmdline.txt, and
  * also settable on the QEMU command line with -append.  LumeOS looks for

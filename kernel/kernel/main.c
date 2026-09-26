@@ -16,7 +16,7 @@
 #include <lume/elf.h>
 #include <lume/fd.h>
 #include <lume/fs.h>
-#include <lume/mem.h>
+#include <lume/auxv.h>
 #include <lume/fcntl.h>
 #include <lume/init.h>
 #include <lume/klog.h>
@@ -28,6 +28,7 @@
 #include <lume/string.h>
 #include <lume/time.h>
 #include <lume/types.h>
+#include <lume/ustack.h>
 
 /* Symbols provided by the linker script. */
 extern char _kernel_image_end_pa[];
@@ -77,11 +78,6 @@ void kernel_main(u32 fdt_pa, u32 load_addr);
  */
 static struct process *init_proc;
 
-/* A word of zero, used for the NULL terminators of argv and envp.  Taking its
- * address is how the stack is filled through copy_to_user(), which is what
- * validates the destination range before writing it. */
-static const u32 zero_word;
-
 /* A kernel thread that behaves like a shell's parent: it waits for init to
  * exit and reports the status.  Doing it with a real wait4-style wait (rather
  * than polling the process table) means the mechanism a shell will use is the
@@ -117,60 +113,47 @@ static void init_watchdog(void *arg)
  * validate against.  That distinction is the reason those functions take a
  * space argument at all.
  */
-static u32 build_user_stack(struct process *p, const char **argv_in, u32 argc)
+/*
+ * The first program's starting state: argv, envp and the auxiliary vector, all
+ * built by kernel/kernel/ustack.c.  The kernel supplies the facts it owns - the
+ * entry point, the program headers, the credentials - and nothing else:
+ *
+ *   - the environment is empty.  There is no init script, no PATH to set and
+ *     nothing to export, so inventing variables here would be inventing policy.
+ *     A program started by a future shell will get the shell's environment.
+ *   - argv[0] is the path it was started with; AT_EXECFN says the same thing to
+ *     a program that has already rearranged argv.
+ */
+static u32 build_user_stack(struct process *p, struct elf_image *image,
+                            const char **argv, const char **envp)
 {
-    u32 top = LUME_USER_STACK_TOP;
-    u32 base = top - LUME_INIT_STACK_PAGES * PAGE_SIZE;
-    u32 sp = top;
-    u32 argv_user[8];
-    const char *argv_local[8];
-    u32 i;
+    struct user_startup start;
+    struct user_stack_info info;
 
-    if (argc > 8)
-        argc = 8;
+    memset(&start, 0, sizeof(start));
+    start.path = LUME_DEFAULT_INIT;
+    start.argv = argv;
+    start.envp = envp;
+    start.entry = image->entry;
+    start.phdr = image->phdr;
+    start.phnum = image->phnum;
+    start.phent = image->phent;
+    start.uid = p->uid;
+    start.euid = p->euid;
+    start.gid = p->gid;
+    start.egid = p->egid;
 
-    for (i = 0; i < LUME_INIT_STACK_PAGES; i++) {
-        u32 pa = pmm_alloc_page();
-
-        if (!pa)
-            return 0;
-        memset((void *)PHYS_TO_VIRT(pa), 0, PAGE_SIZE);
-        if (vmm_map_page(p->as, base + i * PAGE_SIZE, pa,
-                         VM_FLAG_USER | VM_FLAG_WRITE) < 0) {
-            pmm_free_page(pa);
-            return 0;
-        }
-    }
-
-    /* Copy the argument strings near the top of the stack, keeping sp
-     * 8-byte aligned so that the ABI's alignment promise holds at entry. */
-    for (i = 0; i < argc; i++) {
-        u32 len = strlen(argv_in[i]) + 1;
-
-        sp -= len;
-        sp &= ~7u;
-        if (copy_to_user_as(p->as, (void *)sp, argv_in[i], len) < 0)
-            return 0;
-        argv_user[i] = sp;
-    }
-
-    /* The pointers themselves, then the terminator, then argc, then a single
-     * NULL for the (currently empty) environment. */
-    sp &= ~7u;
-    sp -= 4;
-    if (copy_to_user_as(p->as, (void *)sp, &zero_word, 4) < 0)  /* envp[0] = NULL */
-        return 0;
-    for (i = argc; i > 0; i--) {
-        sp -= 4;
-        if (copy_to_user_as(p->as, (void *)sp, &argv_user[i - 1], 4) < 0)
-            return 0;
-    }
-    sp -= 4;
-    if (copy_to_user_as(p->as, (void *)sp, &argc, 4) < 0)
+    if (!user_stack_build_ex(p->as, &start, &info))
         return 0;
 
-    (void)argv_local;
-    return sp;
+    pr_info("init: stack at 0x%08x..0x%08x (%u pages, %u bytes: argc/argv/envp "
+            "+ %u auxv entries)", info.sp, LUME_USER_STACK_TOP, info.pages,
+            info.bytes, info.auxv_entries);
+    pr_info("init: auxv AT_PAGESZ %u, AT_ENTRY 0x%08x, AT_PHDR 0x%08x, "
+            "AT_PHNUM %u, AT_HWCAP 0x%08x, AT_CLKTCK %u",
+            PAGE_SIZE, image->entry, image->phdr, image->phnum,
+            LUME_HWCAP_ARMv6KZ, LUME_AT_CLKTCK_VALUE);
+    return info.sp;
 }
 
 struct process *init_start(struct process *launcher)
@@ -179,6 +162,7 @@ struct process *init_start(struct process *launcher)
     struct process *p;
     u32 sp;
     const char *argv[2];
+    const char *envp[1];
     u32 flags;
 
     pr_notice("init: loading the embedded %u-byte init image (entry 0x%08x, "
@@ -205,9 +189,10 @@ struct process *init_start(struct process *launcher)
     }
     proc_set_brk_base(p, image.image_end);
 
-    argv[0] = "/bin/init";
+    argv[0] = LUME_DEFAULT_INIT;
     argv[1] = NULL;
-    sp = build_user_stack(p, argv, 1);
+    envp[0] = NULL;
+    sp = build_user_stack(p, &image, argv, envp);
     if (!sp) {
         pr_err("init: cannot build the initial stack");
         proc_discard(p, launcher);
@@ -223,9 +208,8 @@ struct process *init_start(struct process *launcher)
     arch_thread_set_user_entry(p->thread, image.entry, sp, 0);
     arm_irq_restore(flags);
 
-    pr_notice("init: entering user mode at 0x%08x on stack 0x%08x "
-              "(%u segments, %u pages)", image.entry, sp, image.segments,
-              image.pages);
+    pr_notice("init: entering user mode at 0x%08x on stack 0x%08x",
+              image.entry, sp);
     return p;
 }
 

@@ -68,6 +68,11 @@ BOOT_MARKERS = [
 USER_MARKERS = [
     "init: entering user mode at",
     "init: hello from user mode",
+    # The program's own verdict on the auxiliary vector it was handed: AT_PAGESZ,
+    # AT_ENTRY against the address of its own _start, AT_PHDR read back as a
+    # valid ELF header, AT_HWCAP without VFP, and 16 non-zero AT_RANDOM bytes.
+    # It prints this line only if every one of those checks passed.
+    "init: auxv verified",
     "init: exiting with status 0",
     "init: pid 1 exited with status 0",
 ]
@@ -77,8 +82,9 @@ SELFTEST_RE = re.compile(r"selftest: (\d+)/(\d+) checks passed")
 # The kernel prints "selftest: N/M checks passed" on every boot; a run that
 # reports fewer checks than this has lost most of its self tests (a build
 # problem, a truncated boot), and the count is asserted so that the summary
-# cannot quietly become vacuous.  The kernel currently defines 59 checks.
-MIN_SELFTEST_CHECKS = 55
+# cannot quietly become vacuous.  The kernel currently runs 85 checks, 26 of
+# which are the initial-stack/auxv tests.
+MIN_SELFTEST_CHECKS = 80
 
 FAILURE_PATTERNS = [
     "PANIC",

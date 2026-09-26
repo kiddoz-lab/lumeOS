@@ -134,14 +134,73 @@ plus `CLONE_SETTLS` covers both. The kernel's job is to store a per-thread value
 and put it in the right register (`cp15 c13` thread id under the MMU) on the
 next context switch.
 
-### HWCAP
+### The initial stack and the auxiliary vector
 
-`AT_HWCAP` must describe this CPU honestly: ARMv6KZ with no VFP, no NEON, no
-Thumb-2, no TLS register usable by the kernel's scheme, and the ARMv6
-byte/halfword/`swp` instruction set. A libc that sees `HWCAP_VFP` will happily
-execute VFP instructions and die with an undefined instruction, which is why
-`do_undef()` prints the "this looks like a coprocessor/VFP instruction" hint
-when it sees a coprocessor encoding.
+A program is started with a stack the kernel built, and the shape of that stack
+is the interface: a C library reads it before `main` runs and has no other way
+to learn the page size, where its program headers are, or what the CPU may be
+asked to do. The layout is Linux's, lowest address first:
+
+```
+sp -> [ argc ][ argv[0..argc-1] ][ NULL ][ envp[0..envc-1] ][ NULL ]
+      [ auxv: type, value, type, value, ... ][ AT_NULL, 0 ]
+      (the strings those pointers name, and 16 bytes AT_RANDOM points at)
+```
+
+`kernel/kernel/ustack.c` builds it, and two properties are worth naming because
+they are easy to get wrong and impossible to notice afterwards: **sp is rounded
+to 16 bytes** (the ARM ABI needs 8; Linux rounds to 16 and some runtimes assume
+it), and **the strings sit above the tables** that point at them, because the
+stack grows down and they are pushed first.
+
+What LumeOS writes into `auxv` today:
+
+| Entry | Value | Why it is there |
+| --- | --- | --- |
+| `AT_HWCAP` | `0x00008097` | what the CPU may be asked to do - see below |
+| `AT_PAGESZ` | `4096` | `PAGE_SIZE`; memory mapping arithmetic starts here |
+| `AT_CLKTCK` | `100` | what `times(2)` counts in (Linux's `USER_HZ`, and our `LUME_HZ`) |
+| `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` | `0x00010034`, `32`, `3` | the program's own headers, so a libc can find `PT_GNU_STACK` without opening a file it may not have |
+| `AT_BASE` | `0` | the interpreter's address: there is no dynamic linker, and this is how a static program says so |
+| `AT_FLAGS` | `0` | nothing set, nothing reserved |
+| `AT_ENTRY` | `0x00010000` | where the program started |
+| `AT_UID`/`AT_EUID`/`AT_GID`/`AT_EGID` | the process's ids | `0` today (no filesystem, no `setuid`), but read from the process, not hardcoded |
+| `AT_SECURE` | `0` | no privilege boundary has been crossed, so nothing needs to be distrusted |
+| `AT_RANDOM` | 16 bytes on the stack | the C library's stack canary seed |
+| `AT_EXECFN` | the name the program was started with | `/bin/init` today; survives a program rewriting its own `argv` |
+| `AT_PLATFORM` | `"v6l"` | Linux's `elf_name` for an ARMv6 core plus the endianness letter; used for `/lib/<platform>/` lookup |
+| `AT_NULL` | `0` | terminates the vector - a program looking for a type that is not there walks until it finds this |
+
+Two absences are decisions rather than gaps:
+
+* **`AT_HWCAP` never has a floating-point bit set.** The BCM2835's ARM1176 does
+  have VFPv2 and Linux would set `HWCAP_VFP` - but Linux also saves and restores
+  the FP registers on every context switch, and LumeOS does not. A program that
+  took the bit at its word would find its floating-point state clobbered by
+  whatever ran in between, which is worse than not running at all. So the mask
+  is `SWP | HALF | THUMB | FAST_MULT | EDSP | TLS`: Linux's `proc-v6.S` list
+  minus `HWCAP_JAVA` (the kernel never enables the Jazelle state, so it will not
+  invite a JVM to use it) minus every FP bit. A `static_assert` in
+  `kernel/include/lume/auxv.h` fails the build if anyone widens it by accident,
+  and the program checks the bit is clear before it continues.
+* **`AT_HWCAP2` is not written at all**, so it reads as 0. That is the right
+  answer for ARMv6, where every bit it defines (IDIV, LPAE, the crypto
+  extensions) belongs to a later architecture.
+
+`HWCAP_TLS` is set, and that one is a promise the kernel keeps:
+ARM1176JZF-S is ARMv6K, so `TPIDRURO` exists, `set_tls` stores a per-process
+value for it, and `arch/arm/context.c` reprograms the register on every switch
+to a user thread.
+
+`AT_RANDOM` deserves its own paragraph, because it is a security mechanism and
+the kernel's honesty about it is the point. The 16 bytes come from
+`kernel/kernel/random.c`: an xorshift32 generator seeded from the system timer,
+the tick count and the kernel's own load address. That is enough to make a
+canary differ between processes and between boots, and it is **not** enough to
+call cryptographic entropy - an attacker who learns one process's canary can
+predict the next one's. The fix is a real source, and the BCM2835 has one (a
+hardware RNG at `0x20104000`, which QEMU models); driving it is a listed task in
+[roadmap.md](roadmap.md) rather than a claim made here.
 
 ---
 
@@ -259,8 +318,8 @@ code does not contain. Nothing here is aspirational.
 | Unimplemented syscalls | return `-ENOSYS` (38) and are logged once per number, naming the number. They do not kill the caller: a program that gets a proper error is a program we can still learn from |
 | User address spaces | ✅ per process, with the kernel half shared; the loader maps into the new space and the scheduler switches to it |
 | `brk` heap | ✅ real: pages are allocated, mapped user-writable and **zeroed** on request; `brk(0)` reports the current break; growth is refused before the `mmap` region (`0x40000000`) instead of corrupting it; shrinking stops at the end of the loaded image |
-| Initial stack | ✅ `argc`, `argv[]`, a terminating `NULL`, an empty `envp`; 8-byte aligned at entry |
-| `auxv` | ⛔ not written. A libc that needs `AT_HWCAP`/`AT_PAGESZ` will not start |
+| Initial stack | ✅ `argc`, `argv[]`, `envp`, both `NULL`-terminated, `sp` rounded to **16** bytes at entry; the environment is deliberately empty (there is no init script and no PATH to set), and a non-empty one is covered by the kernel self test |
+| `auxv` | ✅ 17 pairs plus `AT_NULL`: `AT_HWCAP`, `AT_PAGESZ`, `AT_CLKTCK`, `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`, `AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, the four ids, `AT_SECURE`, `AT_RANDOM`, `AT_EXECFN`, `AT_PLATFORM`; the program checks the values against its own copy of the numbers and prints `init: auxv verified` (a required marker in QEMU) - the table above lists each one |
 | Console as a device | ✅ `fs_node` + ops table (`kernel/drivers/console.c`); descriptors 0/1/2 point at it; `write` does CRLF translation; `read` blocks in the input core's wait queue; `ioctl` returns `-ENOTTY` because there is no terminal driver yet |
 | Process model | ✅ one thread per process; exit status, zombie state, parent wake-up, `wait4` with `WNOHANG`, and the thread slot plus its kernel stack are returned to the pool (a process that exits 64 times does not run out of either) |
 | File descriptors | ✅ table, `refcount` sharing, `dup`/`dup2`/`fd_inherit` for a future `fork` |
@@ -306,10 +365,16 @@ Three levels, matching [testing.md](testing.md):
 * **The in-kernel self tests** validate the loader against the image the kernel
   is actually carrying, including four mutated headers that must be refused.
 * **The QEMU test asserts the program's output**, not just the kernel's: the
-  markers `init: hello from user mode` and `init: exiting with status 0` come
-  from user mode through `write(2)`, and `init: pid 1 exited with status 0`
-  comes from the kernel reaping it. A build that boots but no longer runs
-  programs fails the build.
+  markers `init: hello from user mode`, `init: auxv verified` and
+  `init: exiting with status 0` come from user mode through `write(2)`, and
+  `init: pid 1 exited with status 0` comes from the kernel reaping it. A build
+  that boots but no longer runs programs - or hands one a broken stack - fails
+  the build.
+* **`tests/host/test_ustack_layout.py`** runs the stack builder against a fake
+  machine, so the layout arithmetic (order, alignment, terminators, auxv values,
+  and the refusal paths) is covered on any development machine without an
+  emulator; the in-kernel self test covers the same ground against the real page
+  tables, and `init`'s checks cover the stack a program actually receives.
 
 What is *not* in place: a `make test-userspace` target, a test program that
 exercises one syscall per case, and the structure-layout tests from level 1

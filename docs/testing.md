@@ -75,6 +75,30 @@ Note that `ktest_main.c` deliberately does **not** include `<string.h>`: every
 call must resolve to `kernel/kernel/string.c`, otherwise the test would be
 checking glibc.
 
+### `test_ustack_layout.py` - the initial stack the kernel builds
+
+Compiles `tests/host/ustack_main.c` with `kernel/kernel/ustack.c` and
+`kernel/kernel/random.c`, and runs the stack builder against a fake machine: a
+flat array standing in for physical RAM, a page table that is a list, and four
+strict stubs for `pmm_alloc_page`, `pmm_free_page`, `vmm_map_page` and
+`copy_to_user_as`/`clear_user_as` that refuse to map a page twice, refuse to map
+two virtual pages onto one physical page, and check that the destination is
+mapped before every write.
+
+This covers the part of user mode that is pure address arithmetic and therefore
+testable anywhere: the order of `argc`/`argv`/`envp`/`auxv`, the `NULL`
+terminators, `AT_NULL`, 16-byte `sp` alignment, where the strings are relative to
+the tables that point at them, the auxv values, and the refusal paths - an
+argument vector too long, a string too big for the stack, and running out of
+pages. Getting any of those wrong is not a kernel crash; it is a crash inside a
+program that is already in user mode, which is exactly why it gets a test that
+does not need a board.
+
+What it does not cover: the real page tables, the MMU, and whether a program
+actually finds the stack that way. The in-kernel self test (26 checks) covers the
+first two under QEMU, and `init`'s own `auxv` checks cover the third on a real
+boot.
+
 ### `test_tools.py` - the build tooling
 
 | Class | What it checks |
@@ -173,17 +197,24 @@ A passing run establishes, from the guest's own serial output:
   `main: entering the idle loop`;
 * the kernel prints `selftest: N/N checks passed` - the physical memory manager,
   the kernel heap, MMU mapping and translation, the system timer, the string
-  library, the EABI division helpers, the exception round trip and the ELF
-  loader's validation all behave as their tests require. The emulator asserts
-  `N == M` *and* that at least 55 checks ran, so the summary line cannot quietly
-  become vacuous. Commit `ed52306` reported `59/59`; the count grows with the
-  kernel, and this document only ever states the number together with the commit
-  that showed it;
+  library, the EABI division helpers, the exception round trip, the ELF loader's
+  validation and the initial-stack/auxv layout all behave as their tests
+  require. The emulator asserts `N == M` *and* that at least 80 checks ran, so
+  the summary line cannot quietly become vacuous. Commit `ed52306` reported
+  `59/59` before the 26 stack and auxiliary-vector checks were added; the count
+  grows with the kernel, and this document only ever states a number together
+  with the commit that showed it;
 * the PL011 emits the shell prompt (`lume>`) at the end of a serial log of a few
   kilobytes, so the console, the interrupt path and the receive path are all
   live;
 * QEMU reports no guest errors (see above); `unimp` notes about the
   emulator's own gaps are reported but do not fail the run;
+* the user program's own checks pass: it prints `init: auxv verified` only after
+  finding the auxiliary vector by walking past `argv` and `envp` (so the `NULL`
+  terminators must be there), matching `AT_ENTRY` against the address of its own
+  `_start`, reading `AT_PHDR` back as a valid ELF header whose `e_entry` matches,
+  confirming `AT_HWCAP` has no floating-point bit, and finding 16 non-zero bytes
+  at `AT_RANDOM`;
 * the exception history QEMU records during the run is quiet (the count below
   is for a boot of the kernel alone; a run that also starts a user program adds
   the syscalls and timer interrupts that program takes): the last exception

@@ -78,6 +78,21 @@ struct elf_image {
     u32 image_end;    /* first address past the image, page-aligned */
     u32 segments;     /* PT_LOAD segments mapped */
     u32 pages;        /* pages mapped (image only, not the stack) */
+
+    /*
+     * The program headers, as a *virtual address* - which is what AT_PHDR must
+     * be, and what a C library reads to find PT_LOAD, PT_GNU_STACK and the rest
+     * without re-opening its own file (a static program has no file to open).
+     *
+     * The image is loaded at the address it was linked for (this loader refuses
+     * PIE), but e_entry is still compared against the header's own e_entry
+     * rather than assumed: the offset between "where the file says the entry
+     * is" and "where user mode will actually start" is the one number that
+     * turns a file offset into an address, and it is derived, never assumed.
+     */
+    u32 phdr;         /* virtual address of the program header table */
+    u16 phnum;        /* number of entries */
+    u16 phent;        /* size of one entry (32 for ELF32) */
 };
 
 /*
